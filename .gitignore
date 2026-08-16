@@ -1,0 +1,9 @@
+/evolve-deploy
+/dist/
+coverage.txt
+.DS_Store
+
+# Design notes: internal, and full of things that do not belong in a public
+# repository — account ids, which services run where, and the audit of
+# credentials currently sitting in plaintext.
+DESIGN.md

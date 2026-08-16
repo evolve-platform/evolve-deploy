@@ -1,0 +1,21 @@
+cloud:
+  provider: aws
+  account: "513712104672"
+  region: eu-west-1
+
+services:
+  purchase:
+    version: abc1234
+    cluster: platform
+    envFrom:
+      - ${param:/evolve/${env}/purchase/setup}
+    env:
+      LOG_LEVEL: info
+      CTP_CLIENT_SECRET: ${secret:purchase/ctp-client-secret}
+    before:
+      - hive schema:check --service purchase --commit {{.version}}
+    targets:
+      - { type: ecs, name: purchase }
+      - type: lambda
+        name: purchase-events
+        code: { bucket: labdigital-evolve-artifacts, key: "purchase-sha-{{.version}}.zip" }

@@ -1,0 +1,42 @@
+# evolve-reference-b2b, test environment.
+#
+# Terraform owns cpu, memory, probes, identity, ingress and the secrets declared
+# on each resource. evolve-deploy sets the image tag and the environment.
+cloud:
+  provider: azure
+  subscription: 00000000-0000-0000-0000-000000000000
+  resource_group: evolve-tst
+  app_config: https://evolve-tst.azconfig.io
+
+# Only needed because a ${param:…} reference is used below.
+
+services:
+  purchase:
+    version: abc1234
+    type: container-app
+    env:
+      LOG_LEVEL: info
+      # A secret Terraform declared on this container app, referenced by name.
+      # The value never passes through this tool.
+      CTP_CLIENT_SECRET: ${secret:ctp-client-secret}
+    before:
+      - hive schema:check --service purchase --commit {{.version}}
+    after:
+      - hive schema:publish --service purchase --commit {{.version}}
+
+  # One image, five deployables: the service plus its `evolve sync <job>` runs.
+  # The version is written once, so they cannot drift apart.
+  discover:
+    version: abc1234
+    envFrom:
+      - ${param:/evolve/${env}/discover/setup}
+    targets:
+      - { type: container-app,     name: evolve-tst-discover }
+      - { type: container-app-job, name: evolve-tst-discover-products }
+      - { type: container-app-job, name: evolve-tst-discover-categories }
+      - { type: container-app-job, name: evolve-tst-discover-prices }
+      - { type: container-app-job, name: evolve-tst-discover-inventory }
+
+  site:
+    version: def5678
+    type: container-app

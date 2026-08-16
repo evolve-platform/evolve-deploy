@@ -1,0 +1,27 @@
+# evolve-platform, GCP test environment.
+cloud:
+  provider: gcp
+  project: evolve-tst
+  region: europe-west4
+
+services:
+  purchase:
+    version: abc1234
+    type: cloud-run
+    env:
+      LOG_LEVEL: info
+      # Cloud Run resolves this itself through secretKeyRef; the value never
+      # passes through the deploy.
+      CTP_CLIENT_SECRET: ${secret:purchase-ctp-client-secret}
+    before:
+      - hive schema:check --service purchase --commit {{.version}}
+    after:
+      - hive schema:publish --service purchase --commit {{.version}}
+
+  catalog-commercetools:
+    version: abc1234
+    type: cloud-run
+
+  site:
+    version: def5678
+    type: cloud-run

@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - usestdlibvars
+
+  settings:
+    errcheck:
+      # Writing progress to a terminal cannot usefully fail, and checking it
+      # would drown the output code in error handling that never fires.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+
+formatters:
+  enable:
+    - gofmt

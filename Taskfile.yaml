@@ -1,0 +1,36 @@
+version: '3'
+
+tasks:
+  build:
+    desc: Build a local binary
+    cmd: go build -o evolve-deploy .
+
+  format:
+    desc: Format code — run before committing
+    cmds:
+      - go fmt ./...
+      - go mod tidy
+
+  lint:
+    desc: Run the linters
+    cmd: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.6.2 run
+
+  test:
+    desc: Run all tests
+    cmd: go test ./...
+
+  coverage:
+    desc: Test with a coverage summary
+    cmds:
+      - go test -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
+      - go tool cover -func=coverage.txt
+
+  coverage-html:
+    desc: Test with an HTML coverage report
+    cmds:
+      - go test -race -coverprofile=coverage.txt -covermode=atomic -coverpkg=./... ./...
+      - go tool cover -html=coverage.txt
+
+  snapshot:
+    desc: Build release artifacts without publishing
+    cmd: goreleaser build --snapshot --clean
