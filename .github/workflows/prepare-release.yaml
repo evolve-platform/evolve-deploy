@@ -4,13 +4,15 @@ on:
   push:
     branches: ["main"]
 
-permissions:
-  contents: write
-  pull-requests: write
+permissions: {}
 
 jobs:
   generate-pr:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release branch, create the tag and release
+      pull-requests: write # open the release pull request
+      actions: write # dispatch release.yaml
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -3,12 +3,13 @@ name: Create release
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # goreleaser publishes the GitHub release
     steps:
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
