@@ -429,3 +429,131 @@ services:
 func contains(haystack []string, needle string) bool {
 	return slices.Contains(haystack, needle)
 }
+
+func TestABrokenBeforeHookStopsTheWholeRelease(t *testing.T) {
+	// The gate is the release, not the service. A schema check that fails on
+	// purchase means the release is already lost, so site must not go out
+	// either — half a version deployed is the outcome nobody asked for.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	f := load(t, header+`
+services:
+  purchase:
+    version: v2
+    type: ecs
+    cluster: platform
+    before: ["exit 1"]
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    before: ["true"]
+`)
+
+	p, err := Build(context.Background(), f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = Apply(context.Background(), p, Options{
+		Driver: d,
+		Hooks:  &hooks.Runner{Out: io.Discard},
+		Out:    io.Discard,
+	})
+	if err == nil {
+		t.Fatal("expected the apply to fail")
+	}
+	if !strings.Contains(err.Error(), "nothing was deployed") {
+		t.Errorf("the error should say the release was a no-op, got: %v", err)
+	}
+	if len(d.applied) != 0 {
+		t.Errorf("applied %v after a before hook failed", d.applied)
+	}
+	if len(d.reverted) != 0 {
+		t.Errorf("reverted %v, but nothing was ever deployed", d.reverted)
+	}
+}
+
+func TestEveryBeforeHookRunsBeforeTheRunIsCalledOff(t *testing.T) {
+	// Someone who broke three schemas should see three messages, not fix one
+	// and discover the next on the following run.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	f := load(t, header+`
+services:
+  purchase:
+    version: v2
+    type: ecs
+    cluster: platform
+    before: ["exit 1"]
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    before: ["exit 1"]
+`)
+
+	p, err := Build(context.Background(), f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = Apply(context.Background(), p, Options{
+		Driver: d,
+		Hooks:  &hooks.Runner{Out: io.Discard},
+		Out:    io.Discard,
+	})
+	if err == nil {
+		t.Fatal("expected the apply to fail")
+	}
+	for _, name := range []string{"purchase", "site"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("%s is missing from the error: %v", name, err)
+		}
+	}
+}
+
+func TestAfterHooksFollowTheirOwnService(t *testing.T) {
+	// after is per service and only on success: a service that failed has
+	// nothing to publish, and one that worked should not be held back by it.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+	d.failApply["purchase"] = true
+
+	f := load(t, header+`
+services:
+  purchase:
+    version: v2
+    type: ecs
+    cluster: platform
+    after: ["echo published-purchase"]
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    after: ["echo published-site"]
+`)
+
+	p, err := Build(context.Background(), f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	err = Apply(context.Background(), p, Options{
+		Driver: d,
+		Hooks:  &hooks.Runner{Out: &out},
+		Out:    io.Discard,
+	})
+	if err == nil {
+		t.Fatal("expected the apply to fail")
+	}
+	if strings.Contains(out.String(), "published-purchase") {
+		t.Error("the after hook of a failed service ran")
+	}
+	if !strings.Contains(out.String(), "published-site") {
+		t.Error("the after hook of a service that succeeded did not run")
+	}
+}

@@ -47,6 +47,12 @@ type Driver struct {
 	jobs  *armappcontainers.JobsClient
 	sites *armappservice.WebAppsClient
 
+	// revisions and replicas are only read while waiting for a rollout. The app
+	// resource says whether a revision is ready yet; only these say whether it
+	// is ever going to be.
+	revisions *armappcontainers.ContainerAppsRevisionsClient
+	replicas  *armappcontainers.ContainerAppsRevisionReplicasClient
+
 	// cred is kept because the function-app driver talks to the SCM site over
 	// plain HTTP rather than through ARM, and has to fetch its own token.
 	cred azcore.TokenCredential
@@ -78,9 +84,18 @@ func New(_ context.Context, f *config.File) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
+	revisions, err := armappcontainers.NewContainerAppsRevisionsClient(f.Cloud.Subscription, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("azure: %w", err)
+	}
+	replicas, err := armappcontainers.NewContainerAppsRevisionReplicasClient(f.Cloud.Subscription, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("azure: %w", err)
+	}
 
 	d := &Driver{
 		file: f, apps: apps, jobs: jobs, sites: sites, cred: cred,
+		revisions: revisions, replicas: replicas,
 		// Long enough for a package upload on a slow link; the deployment
 		// itself is waited for separately.
 		http: &http.Client{Timeout: 5 * time.Minute},
@@ -222,6 +237,17 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func derefBool(b *bool) bool {
+	return b != nil && *b
+}
+
+func derefInt32(i *int32) int32 {
+	if i == nil {
+		return 0
+	}
+	return *i
 }
 
 // --- references --------------------------------------------------------------

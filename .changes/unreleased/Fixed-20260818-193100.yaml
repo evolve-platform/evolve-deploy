@@ -1,0 +1,3 @@
+kind: Fixed
+body: A failed Container Apps deploy no longer pays the full readiness timeout twice — the rollback gets its own two minute budget — and a service reverting several targets now does them concurrently instead of one at a time.
+time: 2026-08-18T19:31:00.000000000+02:00

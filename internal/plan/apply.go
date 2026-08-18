@@ -39,10 +39,12 @@ type Options struct {
 
 // Apply executes a plan.
 //
-// Services run concurrently and independently: one failing service does not
-// cancel another that is already halfway through a rollout, because aborting a
-// healthy deploy is worse than letting it finish. Within a service the
-// targets move together — if one fails, the ones that succeeded are put back.
+// It runs in two phases. Every before hook first, as one gate for the whole
+// release; only if all of them pass does anything get written. After that,
+// services roll out concurrently and independently: one failing service does
+// not cancel another that is already halfway through, because aborting a
+// healthy deploy is worse than letting it finish. Within a service the targets
+// move together — if one fails, the ones that succeeded are put back.
 func Apply(ctx context.Context, p *Plan, o Options) error {
 	if o.Concurrency <= 0 {
 		o.Concurrency = defaultConcurrency
@@ -52,6 +54,13 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 	}
 
 	started := time.Now()
+
+	if failed := runBefore(ctx, p, o); len(failed) > 0 {
+		return fmt.Errorf(
+			"%d service(s) failed their before hook after %s; nothing was deployed:\n  - %s",
+			len(failed), time.Since(started).Round(time.Second),
+			strings.Join(failed, "\n  - "))
+	}
 
 	// Warn when the worker limit will actually bite. Without this the per-target
 	// timings look fine while the run takes twice as long, because half the
@@ -110,19 +119,58 @@ func countWork(p *Plan) int {
 	return n
 }
 
-func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
-	c := cp.Service
-	vars := hooks.Vars{
-		"version": c.Version,
-		"name":    c.Name,
+// runBefore runs every before hook and returns the services whose hook failed.
+//
+// The gate is the release, not the service. A before hook is the one failure
+// that is knowable to have written nothing — it runs ahead of every API call —
+// so a schema check that goes red means the release is already dead, and
+// rolling the other services out anyway buys nothing but an environment that
+// is half a version ahead. In a pipeline it also buys twenty more minutes of
+// waiting for a run that was already lost at second sixteen.
+//
+// Every hook runs before any failure is reported: three services with a broken
+// schema should produce three messages, not one per run.
+func runBefore(ctx context.Context, p *Plan, o Options) []string {
+	var (
+		mu     sync.Mutex
+		failed []string
+		wg     sync.WaitGroup
+		sem    = make(chan struct{}, o.Concurrency)
+	)
+
+	for _, cp := range p.Services {
+		if !cp.HasWork() || len(cp.Service.Before) == 0 {
+			continue
+		}
+
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if err := o.Hooks.Run(ctx, "before", cp.Service.Before, hookVars(cp)); err != nil {
+				mu.Lock()
+				failed = append(failed, fmt.Sprintf("%s: %v", cp.Service.Name, err))
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+
+	sort.Strings(failed)
+	return failed
+}
+
+// hookVars are the substitutions a hook is given, for either phase.
+func hookVars(cp *ServicePlan) hooks.Vars {
+	return hooks.Vars{
+		"version": cp.Service.Version,
+		"name":    cp.Service.Name,
 		"env":     cp.Env,
 	}
+}
 
-	// before is the gate: a failed schema check must stop this service from
-	// going out, while leaving the rest of the release alone.
-	if err := o.Hooks.Run(ctx, "before", c.Before, vars); err != nil {
-		return err
-	}
+func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
+	c := cp.Service
 
 	var (
 		mu        sync.Mutex
@@ -161,7 +209,7 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 	wg.Wait()
 
 	if len(errs) > 0 {
-		revert(ctx, succeeded, o, &errs)
+		errs = append(errs, revert(ctx, succeeded, o)...)
 		sort.Strings(errs)
 		return fmt.Errorf("\n      %s", strings.Join(errs, "\n      "))
 	}
@@ -169,23 +217,43 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 	// after only runs on success, and a failure here does not roll anything
 	// back: the deploy worked, and removing a working version because a
 	// registration call failed is worse than the missing registration.
-	if err := o.Hooks.Run(ctx, "after", c.After, vars); err != nil {
+	if err := o.Hooks.Run(ctx, "after", c.After, hookVars(cp)); err != nil {
 		return err
 	}
 	return nil
 }
 
-// revert puts back the targets that succeeded while a sibling failed. The
-// service is the boundary because its targets share one image.
-func revert(ctx context.Context, changes []*target.Change, o Options, errs *[]string) {
+// revert puts back the targets that succeeded while a sibling failed, and
+// returns what could not be put back. The service is the boundary because its
+// targets share one image.
+//
+// Concurrently, for the same reason the rollout is: these are independent
+// writes that each wait on a cloud. One service with five targets was spending
+// a minute reverting them one after another, on top of a deploy that had
+// already failed.
+func revert(ctx context.Context, changes []*target.Change, o Options) []string {
+	var (
+		mu   sync.Mutex
+		errs []string
+		wg   sync.WaitGroup
+	)
+
 	for _, ch := range changes {
 		fmt.Fprintf(o.Out, "  %-*s reverting to %s\n", o.Width,
 			ch.Target.Label(), orNone(ch.FromVersion))
-		if err := o.Driver.Revert(ctx, ch); err != nil {
-			*errs = append(*errs, fmt.Sprintf("%s/%s: revert failed: %v",
-				ch.Target.Type, ch.Target.Name, err))
-		}
+
+		wg.Go(func() {
+			if err := o.Driver.Revert(ctx, ch); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("%s/%s: revert failed: %v",
+					ch.Target.Type, ch.Target.Name, err))
+				mu.Unlock()
+			}
+		})
 	}
+	wg.Wait()
+
+	return errs
 }
 
 func orNone(s string) string {

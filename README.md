@@ -269,11 +269,21 @@ services:
       - { type: container-app, name: evolve-tst-purchase }
 ```
 
-`before` is a gate: if it fails, that service is not deployed, the rest of the
-release continues, and the pipeline fails. `after` runs only once every target
-succeeded, and a failure there rolls nothing back — removing a working version
-because a registration call failed is worse than the missing registration.
-Nothing runs when there is nothing to deploy.
+`before` is the gate for the whole release. Every `before` hook runs first, all
+of them, concurrently; only if every one exits zero does anything get written.
+One failure and nothing is deployed at all — a schema check that goes red means
+the release is already lost, and rolling the other services out anyway leaves an
+environment half a version ahead. You also get every message at once rather than
+one broken schema per run.
+
+`after` is per service and runs only once that service's targets all succeeded,
+so a release where one service failed still publishes for the ones that worked.
+A failure in `after` rolls nothing back — removing a working version because a
+registration call failed is worse than the missing registration.
+
+So the order is: all `before` hooks → all deploys → each service's `after`.
+Nothing runs when there is nothing to deploy, and a service with no work has
+neither hook run.
 
 ## Waiting, failure and rollback
 
@@ -290,9 +300,19 @@ Failures are contained differently depending on when they happen:
 
 - **Anything found while planning stops everything.** A mistyped reference, a
   missing image, a secret that is not declared — nothing is deployed at all.
+- **A failing `before` hook stops everything too.** It runs ahead of every
+  write, so calling the release off there costs nothing and leaves nothing half
+  applied.
 - **A failure during rollout stays with its service.** Its targets go back
   together, because they share an image and may have a contract with each other.
   Services that already succeeded are left alone.
+
+A rollout that fails does not wait out the clock. On Container Apps the tool
+reads the revision itself, so an image that cannot be pulled or a container that
+crash loops fails in seconds with the platform's own message, rather than after
+ten minutes of nothing happening. The rollback that follows gets a much shorter
+budget than the deploy did: it is restoring containers that were serving a
+moment ago, and if that does not come back quickly, waiting will not fix it.
 
 ## What it does not do
 

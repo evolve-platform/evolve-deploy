@@ -184,3 +184,145 @@ func TestAnAbsentEnvConfigLeavesTheEnvironmentAlone(t *testing.T) {
 		t.Errorf("image = %q", img)
 	}
 }
+
+func replica(containers ...*armappcontainers.ReplicaContainer) *armappcontainers.Replica {
+	return &armappcontainers.Replica{
+		Properties: &armappcontainers.ReplicaProperties{Containers: containers},
+	}
+}
+
+func replicaContainer(
+	name string, ready bool, state armappcontainers.ContainerAppContainerRunningState,
+	details string, restarts int32,
+) *armappcontainers.ReplicaContainer {
+	return &armappcontainers.ReplicaContainer{
+		Name:                to.Ptr(name),
+		Ready:               to.Ptr(ready),
+		RunningState:        to.Ptr(state),
+		RunningStateDetails: to.Ptr(details),
+		RestartCount:        to.Ptr(restarts),
+	}
+}
+
+func TestARevisionStillStartingIsNotAFailure(t *testing.T) {
+	// The whole point of the strike count is that a slow start must not be read
+	// as a broken one. Processing is what a revision reports for as long as it
+	// is coming up, and it has to classify as "keep waiting" — anything else
+	// rolls back deploys that were going to work.
+	props := &armappcontainers.RevisionProperties{
+		ProvisioningState: to.Ptr(armappcontainers.RevisionProvisioningStateProvisioning),
+		RunningState:      to.Ptr(armappcontainers.RevisionRunningStateProcessing),
+		HealthState:       to.Ptr(armappcontainers.RevisionHealthStateNone),
+	}
+	if reason, _ := classifyRevision(props); reason != "" {
+		t.Errorf("a revision that is still starting was called broken: %q", reason)
+	}
+
+	// Nor may a healthy one, obviously.
+	props = &armappcontainers.RevisionProperties{
+		ProvisioningState: to.Ptr(armappcontainers.RevisionProvisioningStateProvisioned),
+		RunningState:      to.Ptr(armappcontainers.RevisionRunningStateRunning),
+		HealthState:       to.Ptr(armappcontainers.RevisionHealthStateHealthy),
+	}
+	if reason, _ := classifyRevision(props); reason != "" {
+		t.Errorf("a healthy revision was called broken: %q", reason)
+	}
+
+	// And a response with nothing in it is not evidence of anything.
+	if reason, certain := classifyRevision(nil); reason != "" || certain {
+		t.Errorf("an empty revision produced a verdict: %q %v", reason, certain)
+	}
+}
+
+func TestAFailedProvisionIsActedOnAtOnce(t *testing.T) {
+	// This is the case that used to cost ten minutes: the platform has already
+	// given up, and there is nothing to wait for. The message it carries is
+	// usually the whole answer, so it has to reach the error.
+	props := &armappcontainers.RevisionProperties{
+		ProvisioningState: to.Ptr(armappcontainers.RevisionProvisioningStateFailed),
+		ProvisioningError: to.Ptr("manifest unknown: manifest tagged by \"3f02cd4\" is not found"),
+	}
+
+	reason, certain := classifyRevision(props)
+	if !certain {
+		t.Error("a failed provision should not need a second opinion")
+	}
+	if !strings.Contains(reason, "manifest unknown") {
+		t.Errorf("the platform's own message was dropped: %q", reason)
+	}
+}
+
+func TestADegradedRevisionIsOnlySuspicion(t *testing.T) {
+	// Container Apps restarts a failing container, so Degraded and Processing
+	// alternate. Acting on the first sighting would fail deploys that recover.
+	for _, state := range []armappcontainers.RevisionRunningState{
+		armappcontainers.RevisionRunningStateDegraded,
+		armappcontainers.RevisionRunningStateFailed,
+	} {
+		props := &armappcontainers.RevisionProperties{RunningState: to.Ptr(state)}
+		reason, certain := classifyRevision(props)
+		if reason == "" {
+			t.Errorf("%s was not reported at all", state)
+		}
+		if certain {
+			t.Errorf("%s was treated as final on one poll", state)
+		}
+	}
+}
+
+func TestRestartsTurnSuspicionIntoAVerdict(t *testing.T) {
+	// A container that has already died crashLoopRestarts times is not slow.
+	detail, crashing := describeReplicas([]*armappcontainers.Replica{
+		replica(
+			replicaContainer("main", false,
+				armappcontainers.ContainerAppContainerRunningStateWaiting,
+				"CrashLoopBackOff", crashLoopRestarts),
+			// The sidecar is up and has nothing to do with this.
+			replicaContainer("reverse-proxy", true,
+				armappcontainers.ContainerAppContainerRunningStateRunning, "", 0),
+		),
+	})
+
+	if !crashing {
+		t.Error("a container past the restart limit was not called a crash loop")
+	}
+	if !strings.Contains(detail, "main") || !strings.Contains(detail, "CrashLoopBackOff") {
+		t.Errorf("the detail does not say what broke: %q", detail)
+	}
+	if strings.Contains(detail, "reverse-proxy") {
+		t.Errorf("a container that is up was reported as a problem: %q", detail)
+	}
+}
+
+func TestOneSentencePerBrokenContainer(t *testing.T) {
+	// Every replica of a broken revision reports the same thing, and three
+	// copies of one sentence is not three times the information.
+	one := func() *armappcontainers.Replica {
+		return replica(replicaContainer("main", false,
+			armappcontainers.ContainerAppContainerRunningStateTerminated,
+			"Container exited with code 1", 1))
+	}
+
+	detail, crashing := describeReplicas([]*armappcontainers.Replica{one(), one(), one()})
+	if crashing {
+		t.Error("a single restart was called a crash loop")
+	}
+	if n := strings.Count(detail, "exited with code 1"); n != 1 {
+		t.Errorf("the same failure was reported %d times: %q", n, detail)
+	}
+	if !strings.Contains(detail, "1 restart(s)") {
+		t.Errorf("the restart count is missing: %q", detail)
+	}
+}
+
+func TestAHealthyRevisionHasNothingToDescribe(t *testing.T) {
+	detail, crashing := describeReplicas([]*armappcontainers.Replica{
+		replica(replicaContainer("main", true,
+			armappcontainers.ContainerAppContainerRunningStateRunning, "", 0)),
+		// A replica with nothing in it must not panic anything.
+		{},
+	})
+	if detail != "" || crashing {
+		t.Errorf("a healthy revision produced %q (crashing=%v)", detail, crashing)
+	}
+}
