@@ -1,3 +1,0 @@
-kind: Added
-body: Container Apps deploys now fail as soon as Azure knows a revision is broken, instead of waiting out the ten minute readiness timeout, and the error carries the revision's provisioning error or the container's own state and restart count.
-time: 2026-08-18T09:45:00.000000000+02:00

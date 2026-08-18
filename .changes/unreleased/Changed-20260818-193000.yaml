@@ -1,3 +1,0 @@
-kind: Changed
-body: Before hooks are now the gate for the whole release rather than for one service — every hook runs first, and if any of them fails nothing is deployed at all. After hooks are unchanged, per service and only on success.
-time: 2026-08-18T19:30:00.000000000+02:00
