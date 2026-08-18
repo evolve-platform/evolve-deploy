@@ -143,6 +143,14 @@ type Service struct {
 	Before []string `yaml:"before"`
 	After  []string `yaml:"after"`
 
+	// DependsOn names services that must finish before this one starts. For a
+	// frontend that calls a backend, deploying both at once means the window
+	// where the new frontend talks to the old backend is real but invisible.
+	//
+	// It is an ordering constraint and nothing more: it does not pull a
+	// service into a release that is not otherwise part of it.
+	DependsOn []string `yaml:"depends_on"`
+
 	Name string `yaml:"-"`
 }
 
@@ -319,6 +327,10 @@ func (f *File) validate() error {
 		add("%s", msg)
 	}
 
+	for _, msg := range f.validateDependencies() {
+		add("%s", msg)
+	}
+
 	if len(f.Services) == 0 {
 		add("services: no services defined")
 	}
@@ -458,6 +470,99 @@ func (f *File) validateAddressing() []string {
 	}
 	sort.Strings(msgs)
 	return msgs
+}
+
+// validateDependencies checks that every depends_on names a service in this
+// file, and that the graph has no cycle.
+//
+// Both belong here rather than at apply time: they are properties of the file,
+// knowable by reading it, and a release must not get halfway through before
+// discovering that two services are each waiting for the other.
+func (f *File) validateDependencies() []string {
+	var msgs []string
+
+	for _, name := range f.ServiceNames() {
+		c := f.Services[name]
+		if c == nil {
+			continue
+		}
+		for _, dep := range c.DependsOn {
+			switch {
+			case dep == name:
+				msgs = append(msgs, fmt.Sprintf("services.%s: depends_on itself", name))
+			case f.Services[dep] == nil:
+				msgs = append(msgs, fmt.Sprintf(
+					"services.%s: depends_on %q, which is not a service in this file", name, dep))
+			}
+		}
+	}
+	// Walking a graph that still has edges pointing at nothing reports
+	// nonsense, so the names are settled first.
+	if len(msgs) > 0 {
+		return msgs
+	}
+
+	if cycle := f.findCycle(); len(cycle) > 0 {
+		msgs = append(msgs, fmt.Sprintf(
+			"services: depends_on forms a cycle: %s", strings.Join(cycle, " -> ")))
+	}
+	return msgs
+}
+
+// findCycle returns the services on a depends_on cycle, or nil.
+//
+// The path is the point: "a -> b -> c -> a" is something you can go and fix,
+// where "there is a cycle" leaves you to find it yourself.
+func (f *File) findCycle() []string {
+	const (
+		unvisited = iota
+		onStack
+		finished
+	)
+
+	state := make(map[string]int, len(f.Services))
+	var path []string
+
+	var walk func(name string) []string
+	walk = func(name string) []string {
+		c := f.Services[name]
+		if c == nil {
+			return nil
+		}
+
+		state[name] = onStack
+		path = append(path, name)
+
+		for _, dep := range c.DependsOn {
+			switch state[dep] {
+			case onStack:
+				// Trimmed to where the loop closes, so the path shown is the
+				// cycle itself rather than however we happened to reach it.
+				for i, n := range path {
+					if n == dep {
+						return append(append([]string{}, path[i:]...), dep)
+					}
+				}
+			case unvisited:
+				if cycle := walk(dep); cycle != nil {
+					return cycle
+				}
+			}
+		}
+
+		path = path[:len(path)-1]
+		state[name] = finished
+		return nil
+	}
+
+	for _, name := range f.ServiceNames() {
+		if state[name] == unvisited {
+			if cycle := walk(name); cycle != nil {
+				return cycle
+			}
+		}
+	}
+	return nil
 }
 
 // ServiceNames returns the service names in a stable order, so output and

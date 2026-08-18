@@ -557,3 +557,163 @@ services:
 		t.Error("the after hook of a service that succeeded did not run")
 	}
 }
+
+func TestADependencyDeploysFirst(t *testing.T) {
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	f := load(t, header+`
+services:
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [discover, purchase]
+  discover:
+    version: v2
+    type: ecs
+    cluster: platform
+  purchase:
+    version: v2
+    type: ecs
+    cluster: platform
+`)
+
+	p, err := Build(context.Background(), f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), p, Options{
+		Driver: d,
+		Hooks:  &hooks.Runner{Out: io.Discard},
+		Out:    io.Discard,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The two backends may land in either order, but the frontend has to be
+	// last — that is the whole point of naming them.
+	if got := slices.Index(d.applied, "site"); got != len(d.applied)-1 {
+		t.Errorf("applied = %v, want site last", d.applied)
+	}
+}
+
+func TestAServiceIsSkippedWhenWhatItNeedsFails(t *testing.T) {
+	// Deploying a frontend against a backend that just failed is exactly what
+	// the ordering is there to prevent, so the frontend must not go out at all.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+	d.failApply["discover"] = true
+
+	f := load(t, header+`
+services:
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [discover]
+  discover:
+    version: v2
+    type: ecs
+    cluster: platform
+  unrelated:
+    version: v2
+    type: ecs
+    cluster: platform
+`)
+
+	p, err := Build(context.Background(), f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Apply(context.Background(), p, Options{
+		Driver: d,
+		Hooks:  &hooks.Runner{Out: io.Discard},
+		Out:    io.Discard,
+	})
+	if err == nil {
+		t.Fatal("expected the apply to fail")
+	}
+
+	if contains(d.applied, "site") {
+		t.Errorf("applied = %v, want site left alone", d.applied)
+	}
+	// It never ran, so it is not a failure and must not be counted as one.
+	if !strings.Contains(err.Error(), "1 service(s) failed") {
+		t.Errorf("skipped services were counted as failures: %v", err)
+	}
+	if !strings.Contains(err.Error(), "site, waiting on discover") {
+		t.Errorf("the error does not say why site never ran: %v", err)
+	}
+	// A service that depends on nothing is unaffected by someone else's bad day.
+	if !contains(d.applied, "unrelated") {
+		t.Errorf("applied = %v, want unrelated to have gone out", d.applied)
+	}
+}
+
+func TestADependencyOutsideTheRunIsAlreadySatisfied(t *testing.T) {
+	// The CI case: the pipeline deploys only what it rebuilt, so the backend a
+	// frontend names is usually not in the run at all. That must not block it.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+	d.current["discover"] = "v2"
+
+	f := load(t, header+`
+services:
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [discover]
+  discover:
+    version: v2
+    type: ecs
+    cluster: platform
+`)
+
+	p, err := Build(context.Background(), f, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), p, Options{
+		Driver: d,
+		Hooks:  &hooks.Runner{Out: io.Discard},
+		Out:    io.Discard,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(d.applied, "site") {
+		t.Errorf("applied = %v, want site deployed despite discover not being in the run", d.applied)
+	}
+}
+
+func TestALongerChainDoesNotDeadlockOnWorkers(t *testing.T) {
+	// A chain longer than the worker limit is the case that deadlocks if a
+	// service claims its slot before waiting on what it depends on.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	body := header + "services:\n"
+	for i := range 5 {
+		body += fmt.Sprintf("  svc%d:\n    version: v2\n    type: ecs\n    cluster: platform\n", i)
+		if i > 0 {
+			body += fmt.Sprintf("    depends_on: [svc%d]\n", i-1)
+		}
+	}
+
+	p, err := Build(context.Background(), load(t, body), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), p, Options{
+		Driver:      d,
+		Hooks:       &hooks.Runner{Out: io.Discard},
+		Out:         io.Discard,
+		Concurrency: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"svc0", "svc1", "svc2", "svc3", "svc4"}; !slices.Equal(d.applied, want) {
+		t.Errorf("applied = %v, want %v", d.applied, want)
+	}
+}

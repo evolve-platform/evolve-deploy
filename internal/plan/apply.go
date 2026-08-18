@@ -2,8 +2,11 @@ package plan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -74,36 +77,70 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 			n, o.Concurrency)
 	}
 
+	// One record per service that has work, built before anything starts so
+	// that the map is only ever read from the goroutines below.
+	runs := make(map[string]*serviceRun, len(p.Services))
+	for _, cp := range p.Services {
+		if cp.HasWork() {
+			runs[cp.Service.Name] = &serviceRun{plan: cp, done: make(chan struct{})}
+		}
+	}
+
 	var (
-		mu     sync.Mutex
-		failed []string
-		wg     sync.WaitGroup
-		sem    = make(chan struct{}, o.Concurrency)
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, o.Concurrency)
 	)
 
-	for _, cp := range p.Services {
-		if !cp.HasWork() {
-			continue
-		}
-
+	for _, r := range runs {
 		wg.Go(func() {
-			sem <- struct{}{}
+			defer close(r.done)
+
+			if blocker := awaitDeps(ctx, r, runs); blocker != "" {
+				r.blocker = blocker
+				fmt.Fprintf(o.Out, "  %-*s skipped, %s did not deploy\n",
+					o.Width, r.plan.Service.Name, blocker)
+				return
+			}
+
+			// The slot is claimed only once this service can actually run.
+			// Taking one while still waiting on a dependency would let a chain
+			// of services fill every slot with goroutines that cannot proceed,
+			// and the release would sit there until the deadline.
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				r.err = ctx.Err()
+				return
+			}
 			defer func() { <-sem }()
 
-			if err := applyService(ctx, cp, o); err != nil {
-				mu.Lock()
-				failed = append(failed, fmt.Sprintf("%s: %v", cp.Service.Name, err))
-				mu.Unlock()
-			}
+			r.err = applyService(ctx, r.plan, o)
 		})
 	}
 	wg.Wait()
 
+	var failed, skipped []string
+	for _, name := range slices.Sorted(maps.Keys(runs)) {
+		switch r := runs[name]; {
+		case r.err != nil:
+			failed = append(failed, fmt.Sprintf("%s: %v", name, r.err))
+		case r.blocker != "":
+			skipped = append(skipped, fmt.Sprintf("%s, waiting on %s", name, r.blocker))
+		}
+	}
+
 	if len(failed) > 0 {
-		sort.Strings(failed)
-		return fmt.Errorf("%d service(s) failed after %s:\n  - %s",
+		msg := fmt.Sprintf("%d service(s) failed after %s:\n  - %s",
 			len(failed), time.Since(started).Round(time.Second),
 			strings.Join(failed, "\n  - "))
+		// Named separately from the failures, because a service that never ran
+		// has nothing wrong with it and counting it as a failure sends whoever
+		// reads this looking in the wrong place.
+		if len(skipped) > 0 {
+			msg += fmt.Sprintf("\n%d service(s) were not deployed at all:\n  - %s",
+				len(skipped), strings.Join(skipped, "\n  - "))
+		}
+		return errors.New(msg)
 	}
 
 	// The total, which is the number nobody can work out from the per-target
@@ -121,6 +158,50 @@ func countWork(p *Plan) int {
 		}
 	}
 	return n
+}
+
+// serviceRun tracks one service through the release.
+//
+// err and blocker are written by that service's own goroutine before its done
+// channel closes, so anything that has waited on done may read them without a
+// lock.
+type serviceRun struct {
+	plan *ServicePlan
+	done chan struct{}
+
+	// err is a real failure: the service ran and something went wrong.
+	err error
+	// blocker names the dependency that stopped this service from running at
+	// all. Nothing was written for it, so it is not a failure of its own.
+	blocker string
+}
+
+// awaitDeps blocks until every service this one depends on has finished, and
+// returns the name of one that did not make it.
+//
+// A dependency that is not part of this run is already satisfied and is not
+// waited for. That is what makes depends_on usable in CI: the pipeline deploys
+// only what it rebuilt, so the backend a frontend names is often simply not
+// there — and demanding it be present would fail every release that touched
+// one service.
+func awaitDeps(ctx context.Context, r *serviceRun, runs map[string]*serviceRun) string {
+	for _, name := range r.plan.Service.DependsOn {
+		dep, ok := runs[name]
+		if !ok {
+			continue
+		}
+
+		select {
+		case <-dep.done:
+		case <-ctx.Done():
+			return name
+		}
+
+		if dep.err != nil || dep.blocker != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // runBefore runs every before hook and returns the services whose hook failed.

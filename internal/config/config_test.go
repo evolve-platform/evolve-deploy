@@ -322,3 +322,66 @@ services:
 		}
 	}
 }
+
+func TestDependsOnMustNameAServiceInTheFile(t *testing.T) {
+	// A typo would otherwise be silent: the dependency is simply never found
+	// in the run, and the service deploys straight away.
+	_, err := load(t, awsHeader+`
+services:
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [discovr]
+`)
+	if err == nil {
+		t.Fatal("a dependency on a service that does not exist was accepted")
+	}
+	if !strings.Contains(err.Error(), "discovr") {
+		t.Errorf("the error does not name the typo: %v", err)
+	}
+}
+
+func TestDependsOnRefusesACycle(t *testing.T) {
+	_, err := load(t, awsHeader+`
+services:
+  a:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [c]
+  b:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [a]
+  c:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [b]
+`)
+	if err == nil {
+		t.Fatal("a cycle was accepted; the apply would have deadlocked")
+	}
+	// The path is the point — "there is a cycle" leaves you to find it.
+	for _, name := range []string{"a", "b", "c"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("%s is missing from the cycle path: %v", name, err)
+		}
+	}
+}
+
+func TestDependsOnRefusesItself(t *testing.T) {
+	_, err := load(t, awsHeader+`
+services:
+  site:
+    version: v2
+    type: ecs
+    cluster: platform
+    depends_on: [site]
+`)
+	if err == nil {
+		t.Fatal("a service depending on itself was accepted")
+	}
+}

@@ -285,6 +285,38 @@ So the order is: all `before` hooks → all deploys → each service's `after`.
 Nothing runs when there is nothing to deploy, and a service with no work has
 neither hook run.
 
+## Order
+
+Services roll out concurrently by default, which is right until one of them
+reads from another. `depends_on` says which way round:
+
+```yaml
+services:
+  discover:
+    version: abc1234
+    type: container-app
+    name: evolve-tst-discover
+  site:
+    version: abc1234
+    depends_on: [discover, purchase]
+    type: container-app
+    name: evolve-tst-site
+```
+
+`site` now starts only once both backends have finished. Everything else still
+runs at once — this is an ordering constraint, not a queue, so each service
+waits for exactly what it named and nothing else.
+
+Two things it deliberately does not do. It does not pull a service into a
+release: a dependency that is not part of this run — filtered out by `--only`,
+or already at its version — is simply satisfied, which is what makes it usable
+in CI where the pipeline deploys only what it rebuilt. And it does not deploy a
+service whose dependency failed; that one is reported as not deployed rather
+than counted as a failure of its own, because nothing was written for it.
+
+A `depends_on` naming a service that is not in the file, or a cycle between
+services, fails while reading the config — before anything is deployed.
+
 ## Waiting, failure and rollback
 
 The tool waits until a target is healthy: ECS `services-stable`, a Cloud Run

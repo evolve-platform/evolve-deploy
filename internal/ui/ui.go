@@ -48,6 +48,12 @@ func RenderPlan(w io.Writer, p *plan.Plan) {
 			fmt.Fprintf(w, "  %-*s up to date\n", width, t.Label())
 		}
 
+		// Ordering is invisible in the plan otherwise, and a service that sits
+		// there doing nothing for two minutes looks stuck rather than queued.
+		if deps := cp.Service.DependsOn; len(deps) > 0 {
+			fmt.Fprintf(w, "  %-*s %s\n", width, "waits for", strings.Join(deps, ", "))
+		}
+
 		if len(cp.Service.Before) > 0 || len(cp.Service.After) > 0 {
 			fmt.Fprintf(w, "  %-*s %d before, %d after\n", width, "hooks",
 				len(cp.Service.Before), len(cp.Service.After))
