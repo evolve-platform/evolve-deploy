@@ -1,3 +1,0 @@
-kind: Added
-body: Hook output is prefixed with the service it came from, so three package managers printing at once stay readable. Lines are also buffered until complete, so one hook can no longer cut another's line in half.
-time: 2026-08-18T20:15:00.000000000+02:00
