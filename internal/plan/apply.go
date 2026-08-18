@@ -53,6 +53,10 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 		o.Width = 34
 	}
 
+	// Hook output is tagged with the service that produced it, in a column
+	// sized to the widest name that actually has hooks.
+	o.Hooks.Width = hookWidth(p)
+
 	started := time.Now()
 
 	if failed := runBefore(ctx, p, o); len(failed) > 0 {
@@ -147,7 +151,7 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if err := o.Hooks.Run(ctx, "before", cp.Service.Before, hookVars(cp)); err != nil {
+			if err := o.Hooks.Run(ctx, cp.Service.Name, "before", cp.Service.Before, hookVars(cp)); err != nil {
 				mu.Lock()
 				failed = append(failed, fmt.Sprintf("%s: %v", cp.Service.Name, err))
 				mu.Unlock()
@@ -158,6 +162,24 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 
 	sort.Strings(failed)
 	return failed
+}
+
+// hookWidth sizes the [service] tag so hook output from different services
+// lines up, the same way the plan aligns its target labels. Only services that
+// actually have hooks count: a name that never prints must not indent the ones
+// that do.
+func hookWidth(p *Plan) int {
+	var width int
+	for _, cp := range p.Services {
+		if !cp.HasWork() {
+			continue
+		}
+		if len(cp.Service.Before) == 0 && len(cp.Service.After) == 0 {
+			continue
+		}
+		width = max(width, len(cp.Service.Name)+2)
+	}
+	return width
 }
 
 // hookVars are the substitutions a hook is given, for either phase.
@@ -217,7 +239,7 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 	// after only runs on success, and a failure here does not roll anything
 	// back: the deploy worked, and removing a working version because a
 	// registration call failed is worse than the missing registration.
-	if err := o.Hooks.Run(ctx, "after", c.After, hookVars(cp)); err != nil {
+	if err := o.Hooks.Run(ctx, c.Name, "after", c.After, hookVars(cp)); err != nil {
 		return err
 	}
 	return nil

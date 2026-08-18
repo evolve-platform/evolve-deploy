@@ -53,8 +53,8 @@ definition rather than by anything in this file.`,
 				"name":    cp.Service.Name,
 				"env":     cp.Env,
 			}
-			_ = runner.Run(ctx, "before", cp.Service.Before, vars)
-			_ = runner.Run(ctx, "after", cp.Service.After, vars)
+			_ = runner.Run(ctx, cp.Service.Name, "before", cp.Service.Before, vars)
+			_ = runner.Run(ctx, cp.Service.Name, "after", cp.Service.After, vars)
 		}
 
 		if flagDiffExitCode && !p.Empty() {

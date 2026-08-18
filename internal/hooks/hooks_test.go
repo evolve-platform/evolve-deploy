@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -11,7 +12,7 @@ func TestRunSubstitutesAndCaptures(t *testing.T) {
 	var out bytes.Buffer
 	r := &Runner{Out: &out}
 
-	err := r.Run(context.Background(), "after",
+	err := r.Run(context.Background(), "purchase", "after",
 		[]string{"echo published {{.name}} at {{.version}} to {{.env}}"},
 		Vars{"name": "purchase", "version": "abc1234", "env": "tst"})
 	if err != nil {
@@ -28,7 +29,7 @@ func TestRunStopsAtTheFirstFailure(t *testing.T) {
 	var out bytes.Buffer
 	r := &Runner{Out: &out}
 
-	err := r.Run(context.Background(), "before",
+	err := r.Run(context.Background(), "purchase", "before",
 		[]string{"exit 1", "echo should-not-run"},
 		Vars{})
 	if err == nil {
@@ -45,7 +46,7 @@ func TestUnknownVariableIsAnError(t *testing.T) {
 	var out bytes.Buffer
 	r := &Runner{Out: &out}
 
-	err := r.Run(context.Background(), "after",
+	err := r.Run(context.Background(), "purchase", "after",
 		[]string{"hive publish --commit {{.nope}}"}, Vars{"version": "abc"})
 	if err == nil {
 		t.Fatal("expected an error for an unknown variable")
@@ -56,11 +57,99 @@ func TestDryRunPrintsWithoutRunning(t *testing.T) {
 	var out bytes.Buffer
 	r := &Runner{Out: &out, DryRun: true}
 
-	if err := r.Run(context.Background(), "before",
+	if err := r.Run(context.Background(), "purchase", "before",
 		[]string{"exit 1"}, Vars{}); err != nil {
 		t.Fatalf("dry run should not execute anything: %v", err)
 	}
 	if !strings.Contains(out.String(), "before: exit 1") {
 		t.Errorf("output was %q", out.String())
+	}
+}
+
+func TestOutputIsTaggedWithTheService(t *testing.T) {
+	var out bytes.Buffer
+	r := &Runner{Out: &out}
+
+	if err := r.Run(context.Background(), "discover", "before",
+		[]string{"echo checking schema"}, Vars{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "[discover] checking schema\n" {
+		t.Errorf("output was %q", got)
+	}
+}
+
+func TestTagsAreAlignedToTheWidestName(t *testing.T) {
+	// Three package managers printing at once is only readable if the tags
+	// form a column.
+	var out bytes.Buffer
+	r := &Runner{Out: &out, Width: len("discover") + 2}
+
+	for _, name := range []string{"discover", "site"} {
+		if err := r.Run(context.Background(), name, "before",
+			[]string{"echo x"}, Vars{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("lines = %q", lines)
+	}
+	if a, b := strings.Index(lines[0], "x"), strings.Index(lines[1], "x"); a != b {
+		t.Errorf("output does not line up:\n%s", out.String())
+	}
+}
+
+func TestATrailingPartialLineIsNotSwallowed(t *testing.T) {
+	// A hook that ends without a newline is exactly where a last error tends
+	// to sit, so it must still come out.
+	var out bytes.Buffer
+	r := &Runner{Out: &out}
+
+	if err := r.Run(context.Background(), "site", "after",
+		[]string{"printf 'no trailing newline'"}, Vars{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "[site] no trailing newline\n" {
+		t.Errorf("output was %q", got)
+	}
+}
+
+func TestConcurrentHooksDoNotShredEachOther(t *testing.T) {
+	// The real case: every service's before hook runs at once, each one a
+	// package manager with plenty to say. No line may end up half one service
+	// and half another.
+	var out bytes.Buffer
+	r := &Runner{Out: &out, Width: len("discover") + 2}
+
+	var wg sync.WaitGroup
+	for _, name := range []string{"discover", "purchase", "site"} {
+		wg.Go(func() {
+			err := r.Run(context.Background(), name, "before",
+				[]string{"for i in $(seq 1 50); do echo " + name + "-$i; done"}, Vars{})
+			if err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) != 150 {
+		t.Fatalf("got %d lines, want 150", len(lines))
+	}
+	for _, line := range lines {
+		tag, rest, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			t.Fatalf("line has no body: %q", line)
+		}
+		body := strings.TrimSpace(rest)
+		// The tag and what follows it have to name the same service, or a
+		// write from one hook landed inside another's line.
+		name := strings.Trim(tag, "[]")
+		if !strings.HasPrefix(body, name+"-") {
+			t.Errorf("line is tagged %s but reads %q", tag, body)
+		}
 	}
 }
