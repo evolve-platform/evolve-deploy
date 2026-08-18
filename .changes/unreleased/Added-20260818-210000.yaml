@@ -1,3 +1,0 @@
-kind: Added
-body: A service can name others with depends_on, so a frontend rolls out only once the backends it reads from have finished. Ordering only — a dependency that is not part of the run is already satisfied, and an unknown name or a cycle fails while reading the config.
-time: 2026-08-18T21:00:00.000000000+02:00
