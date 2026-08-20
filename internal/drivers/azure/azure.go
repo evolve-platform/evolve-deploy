@@ -18,11 +18,13 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/containers/azcontainerregistry"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azappconfig"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appcontainers/armappcontainers/v3"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appservice/armappservice/v5"
@@ -57,6 +59,12 @@ type Driver struct {
 	// plain HTTP rather than through ARM, and has to fetch its own token.
 	cred azcore.TokenCredential
 	http *http.Client
+
+	// registries holds one client per Container Registry host, built on demand.
+	// Only `update` needs them — a deploy never reads a tag list — so a
+	// repository that never runs it never talks to a registry at all.
+	registryMu sync.Mutex
+	registries map[string]*azcontainerregistry.Client
 
 	// appConfig is built only when needed: most repositories never use ${param:…}, and
 	// requiring an App Configuration endpoint from every one of them would be

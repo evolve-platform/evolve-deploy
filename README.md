@@ -33,9 +33,10 @@ CLI, no Terraform, no runtime.
 ## Commands
 
 ```sh
-evolve-deploy diff  deploy/tst.yaml              # what would happen, changes nothing
-evolve-deploy diff  deploy/prd.yaml --exit-code  # non-zero if production has drifted
-evolve-deploy apply deploy/tst.yaml              # roll it out
+evolve-deploy diff   deploy/tst.yaml              # what would happen, changes nothing
+evolve-deploy diff   deploy/prd.yaml --exit-code  # non-zero if production has drifted
+evolve-deploy apply  deploy/tst.yaml              # roll it out
+evolve-deploy update deploy/acc.yaml              # pick a version per service, then write the file
 ```
 
 The config path is the only positional argument, and the only thing that decides
@@ -48,11 +49,59 @@ which environment is touched. Useful flags:
 | `-v`, `--verbose` | log every API call and every poll, to stderr |
 | `--workers N` | services rolled out at once (default 16) |
 | `--env NAME` | override what `${env}` and `{{.env}}` expand to (default: the filename) |
+| `--commits N` | how many commits `update` offers as versions (default 30) |
+| `--dir PATH` | working directory for hooks, and the repository `update` reads commits from |
 
 `diff` is read-only. It resolves every reference, checks that every image
 exists, picks the right container and compares the full desired state — so a
 broken reference or an image that was never pushed is found without touching
 anything.
+
+## Promoting a release
+
+Acceptance and production read their versions from the file, so promoting a
+release means editing fourteen shas by hand — from commits nobody remembers, for
+services whose images may never have been built. `update` asks instead:
+
+```sh
+cp deploy/tst.yaml deploy/acc.yaml
+evolve-deploy update deploy/acc.yaml
+```
+
+One question per service, in the order they appear in the file:
+
+```
+discover
+runs ccc3333 — feat: bulk index endpoint
+> leave as is — ccc3333
+  ddd4444  chore: bump deps
+  ccc3333  feat: bulk index endpoint  (current)
+  bbb2222  fix: retry on a 429 from commercetools
+```
+
+The candidates are the last `--commits` commits (30 by default) of the
+repository in `--dir`, newest first, narrowed to the ones whose artifact exists:
+ECR, ACR or Artifact Registry for an image, S3 or blob storage for a zip. A
+commit that never touched this service, or whose build job failed, is therefore
+not offered at all. `/` filters the list, `enter` accepts, `ctrl+c` quits.
+
+A service with several targets — a container app and its four jobs — is only
+offered a version that every one of them has. A service is one version, and
+offering one that three targets out of five carry would produce exactly the
+half-deployed release the plan phase exists to prevent.
+
+Nothing is written until every question has an answer. Then only the `version:`
+scalars change: comments, key order and `{ type: ecs, name: purchase }`
+one-liners stay exactly as they were, so the diff holds versions and nothing
+else. Review it, merge it, and `apply` deploys it.
+
+Reading a tag list is a permission a deploy does not need — `ecr:BatchGetImage`,
+`AcrPull` on the Azure registry, `artifactregistry.tags.get` on GCP. Where a
+registry cannot be listed at all, the tool says so and offers every commit
+rather than an empty list.
+
+`update` asks questions, so it needs a terminal and refuses without one. In a
+pipeline, commit the file or pass `--set`.
 
 ## Config
 
@@ -415,6 +464,12 @@ nothing has been deployed to one yet, so one deploy, the trigger sync and the
 rollback are untested.
 
 Built but never run against a real account: the **AWS** and **GCP** drivers.
+
+`update` is covered end to end by tests — the questions, the intersection
+across targets, the key handling and the rewrite of a file with comments and
+flow mappings in it — but the three registry listings behind it (ECR
+`BatchGetImage`, ACR tag pages, Artifact Registry `GetTag`) have not yet run
+against a real account.
 
 Not built: Kubernetes/Helm, and `${version}` in environment values. Anything
 unimplemented reports an explicit error rather than silently doing nothing.

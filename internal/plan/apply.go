@@ -4,17 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/evolve-platform/evolve-deploy/internal/console"
 	"github.com/evolve-platform/evolve-deploy/internal/hooks"
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
+
+// waitNotice is how long a target may go quiet before the log says it is still
+// there.
+//
+// A rollout is a write and then two minutes of polling, and the polling prints
+// nothing. In a pipeline log that reads as a hang, and someone cancels a deploy
+// that was going fine. Ten seconds is what terraform settled on for the same
+// problem, and it is short enough that the first notice arrives while whoever
+// started the release is still watching.
+const waitNotice = 10 * time.Second
 
 // defaultConcurrency is set above the service count of any repository this is
 // aimed at, so the limit does not quietly serialise a deploy. Nine services
@@ -25,7 +36,8 @@ const defaultConcurrency = 16
 type Options struct {
 	Driver target.Driver
 	Hooks  *hooks.Runner
-	Out    io.Writer
+	// Log is where every line of the run is written, tagged and aligned.
+	Log *console.Log
 	// Concurrency bounds how many services roll out at once.
 	//
 	// A worker spends almost all its time waiting: one write, then a poll every
@@ -36,8 +48,9 @@ type Options struct {
 	//
 	// Raising it past the number of services does nothing at all.
 	Concurrency int
-	// Width aligns progress lines with the plan printed above them.
-	Width int
+	// WaitNotice overrides how long a target may go quiet before the log says it
+	// is still being waited on. Zero means waitNotice.
+	WaitNotice time.Duration
 }
 
 // Apply executes a plan.
@@ -52,13 +65,9 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 	if o.Concurrency <= 0 {
 		o.Concurrency = defaultConcurrency
 	}
-	if o.Width <= 0 {
-		o.Width = 34
+	if o.WaitNotice <= 0 {
+		o.WaitNotice = waitNotice
 	}
-
-	// Hook output is tagged with the service that produced it, in a column
-	// sized to the widest name that actually has hooks.
-	o.Hooks.Width = hookWidth(p)
 
 	started := time.Now()
 
@@ -73,7 +82,7 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 	// timings look fine while the run takes twice as long, because half the
 	// services spent that time waiting for a slot.
 	if n := countWork(p); n > o.Concurrency {
-		fmt.Fprintf(o.Out, "  %d services, %d at a time — some will wait for a slot\n",
+		o.Log.Plain("%d services, %d at a time — some will wait for a slot",
 			n, o.Concurrency)
 	}
 
@@ -97,8 +106,7 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 
 			if blocker := awaitDeps(ctx, r, runs); blocker != "" {
 				r.blocker = blocker
-				fmt.Fprintf(o.Out, "  %-*s skipped, %s did not deploy\n",
-					o.Width, r.plan.Service.Name, blocker)
+				o.Log.Note(r.plan.Service.Name, "skipped, %s did not deploy", blocker)
 				return
 			}
 
@@ -146,7 +154,8 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 	// The total, which is the number nobody can work out from the per-target
 	// times: those are measured from when a target got a slot, not from when
 	// the run began.
-	fmt.Fprintf(o.Out, "\ndone in %s\n", time.Since(started).Round(time.Second))
+	o.Log.Blank()
+	o.Log.Plain("done in %s", time.Since(started).Round(time.Second))
 	return nil
 }
 
@@ -245,24 +254,6 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 	return failed
 }
 
-// hookWidth sizes the [service] tag so hook output from different services
-// lines up, the same way the plan aligns its target labels. Only services that
-// actually have hooks count: a name that never prints must not indent the ones
-// that do.
-func hookWidth(p *Plan) int {
-	var width int
-	for _, cp := range p.Services {
-		if !cp.HasWork() {
-			continue
-		}
-		if len(cp.Service.Before) == 0 && len(cp.Service.After) == 0 {
-			continue
-		}
-		width = max(width, len(cp.Service.Name)+2)
-	}
-	return width
-}
-
 // hookVars are the substitutions a hook is given, for either phase.
 func hookVars(cp *ServicePlan) hooks.Vars {
 	return hooks.Vars{
@@ -291,12 +282,18 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 			// probe that waits a minute before its first check.
 			started := time.Now()
 
-			if err := o.Driver.Apply(ctx, ch); err != nil {
+			// The driver is handed a context it can report through, and a
+			// progress line goes out for as long as it takes. Both stop the
+			// moment it returns.
+			tctx, stop := watch(ctx, o, c.Name, ch, started)
+			err := o.Driver.Apply(tctx, ch)
+			stop()
+
+			if err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Sprintf("%s/%s: %v", ch.Target.Type, ch.Target.Name, err))
 				mu.Unlock()
-				fmt.Fprintf(o.Out, "  %-*s failed after %s\n", o.Width,
-					ch.Target.Label(),
+				o.Log.Line(c.Name, ch.Target.Label(), "failed after %s",
 					time.Since(started).Round(time.Second))
 				return
 			}
@@ -304,15 +301,14 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 			succeeded = append(succeeded, ch)
 			mu.Unlock()
 
-			fmt.Fprintf(o.Out, "  %-*s %s in %s\n", o.Width,
-				ch.Target.Label(),
+			o.Log.Line(c.Name, ch.Target.Label(), "%s in %s",
 				ch.ToVersion, time.Since(started).Round(time.Second))
 		})
 	}
 	wg.Wait()
 
 	if len(errs) > 0 {
-		errs = append(errs, revert(ctx, succeeded, o)...)
+		errs = append(errs, revert(ctx, cp, succeeded, o)...)
 		sort.Strings(errs)
 		return fmt.Errorf("\n      %s", strings.Join(errs, "\n      "))
 	}
@@ -334,7 +330,7 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 // writes that each wait on a cloud. One service with five targets was spending
 // a minute reverting them one after another, on top of a deploy that had
 // already failed.
-func revert(ctx context.Context, changes []*target.Change, o Options) []string {
+func revert(ctx context.Context, cp *ServicePlan, changes []*target.Change, o Options) []string {
 	var (
 		mu   sync.Mutex
 		errs []string
@@ -342,8 +338,8 @@ func revert(ctx context.Context, changes []*target.Change, o Options) []string {
 	)
 
 	for _, ch := range changes {
-		fmt.Fprintf(o.Out, "  %-*s reverting to %s\n", o.Width,
-			ch.Target.Label(), orNone(ch.FromVersion))
+		o.Log.Line(cp.Service.Name, ch.Target.Label(), "reverting to %s",
+			orNone(ch.FromVersion))
 
 		wg.Go(func() {
 			if err := o.Driver.Revert(ctx, ch); err != nil {
@@ -357,6 +353,52 @@ func revert(ctx context.Context, changes []*target.Change, o Options) []string {
 	wg.Wait()
 
 	return errs
+}
+
+// watch reports that a target is still being waited on, every waitNotice until
+// the returned function is called.
+//
+// What it is waiting for comes from the driver, which is the only thing that
+// knows: the same ten-second silence can be an image being pulled, a probe that
+// has not passed, or an ARM operation that has not been acknowledged. Nothing
+// reported yet reads as the platform in general, which is true and is still
+// better than no line at all.
+func watch(
+	ctx context.Context, o Options, service string, ch *target.Change, started time.Time,
+) (context.Context, func()) {
+	var status atomic.Pointer[string]
+	ctx = target.WithStatus(ctx, func(note string) { status.Store(&note) })
+
+	done := make(chan struct{})
+	// Closed last, so stopping waits for a line that is already being written.
+	// Without that, a notice can land under the target's own result and read as
+	// a target that is somehow both finished and still going.
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+
+		t := time.NewTicker(o.WaitNotice)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				waiting := "the platform"
+				if note := status.Load(); note != nil {
+					waiting = *note
+				}
+				o.Log.Line(service, ch.Target.Label(), "still waiting on %s, %s",
+					waiting, time.Since(started).Round(time.Second))
+			}
+		}
+	}()
+
+	return ctx, func() {
+		close(done)
+		<-stopped
+	}
 }
 
 func orNone(s string) string {

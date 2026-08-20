@@ -40,7 +40,8 @@ release deployed.`,
 			return err
 		}
 
-		ui.RenderPlan(out, p)
+		log := ui.NewLog(out, p)
+		ui.RenderPlan(log, p)
 		if p.Empty() {
 			return nil
 		}
@@ -62,10 +63,9 @@ release deployed.`,
 
 		return plan.Apply(ctx, p, plan.Options{
 			Driver:      driver,
-			Hooks:       &hooks.Runner{Dir: flagDir, Out: out},
-			Out:         out,
+			Hooks:       &hooks.Runner{Dir: flagDir, Log: log},
+			Log:         log,
 			Concurrency: flagWorkers,
-			Width:       ui.Width(p),
 		})
 	},
 }

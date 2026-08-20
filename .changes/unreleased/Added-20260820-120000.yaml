@@ -1,0 +1,3 @@
+kind: Added
+body: '`evolve-deploy update <config>` asks which version each service should run and writes the answers back. The list per service is the recent commits with their subject lines, newest first, narrowed to the ones whose artifact actually exists in ECR, ACR, Artifact Registry, S3 or blob storage — and for a service with several targets, only versions every target has. Only the version scalars are rewritten, so comments, key order and one-line targets survive.'
+time: 2026-08-20T12:00:00.000000000+02:00

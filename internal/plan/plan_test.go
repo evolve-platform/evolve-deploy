@@ -10,8 +10,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/evolve-platform/evolve-deploy/internal/config"
+	"github.com/evolve-platform/evolve-deploy/internal/console"
 	"github.com/evolve-platform/evolve-deploy/internal/hooks"
 	"github.com/evolve-platform/evolve-deploy/internal/refs"
 	"github.com/evolve-platform/evolve-deploy/internal/target"
@@ -26,8 +28,16 @@ type fakeDriver struct {
 	// current maps target name to the version it runs; absent means "not
 	// deployed yet".
 	current map[string]string
+
+	// available maps target name to the versions that have an artifact, for
+	// Artifacts.
+	available map[string][]string
 	// failApply names targets whose Apply should fail.
 	failApply map[string]bool
+	// waitFor makes Apply block, and waitingOn what it then claims to be
+	// waiting for — the two things a progress line is made of.
+	waitFor   time.Duration
+	waitingOn string
 
 	mu       sync.Mutex
 	applied  []string
@@ -70,7 +80,33 @@ func (d *fakeDriver) Plan(_ context.Context, want *target.Desired) (*target.Chan
 	}, nil
 }
 
-func (d *fakeDriver) Apply(_ context.Context, ch *target.Change) error {
+// Artifacts is only asked by `update`, never by a plan, so the fake answers
+// with whatever it was given and the interface stays satisfied.
+func (d *fakeDriver) Artifacts(
+	_ context.Context, t *config.Target, versions []string,
+) ([]string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	have := map[string]bool{}
+	for _, v := range d.available[t.Name] {
+		have[v] = true
+	}
+	return target.Present(versions, have), nil
+}
+
+func (d *fakeDriver) Apply(ctx context.Context, ch *target.Change) error {
+	if d.waitFor > 0 {
+		if d.waitingOn != "" {
+			target.Status(ctx, "%s", d.waitingOn)
+		}
+		select {
+		case <-time.After(d.waitFor):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.failApply[ch.Target.Name] {
@@ -406,8 +442,8 @@ services:
 
 	err = Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: io.Discard},
-		Out:    io.Discard,
+		Hooks:  &hooks.Runner{Log: discardLog()},
+		Log:    discardLog(),
 	})
 	if err == nil {
 		t.Fatal("expected the apply to fail")
@@ -425,6 +461,90 @@ services:
 		t.Errorf("applied = %v, want site to have been deployed", d.applied)
 	}
 }
+
+func TestASlowTargetSaysItIsStillWaiting(t *testing.T) {
+	// Two minutes of silence while a container passes its probes is
+	// indistinguishable from a hang, and someone cancels a release that was
+	// going fine.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+	d.waitFor = 120 * time.Millisecond
+	d.waitingOn = "health"
+
+	p, err := Build(context.Background(), load(t, header+`
+services:
+  purchase:
+    version: v2
+    type: ecs
+    cluster: platform
+`), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	log := console.New(&out, 0, 0)
+	if err := Apply(context.Background(), p, Options{
+		Driver:     d,
+		Hooks:      &hooks.Runner{Log: log},
+		Log:        log,
+		WaitNotice: 20 * time.Millisecond,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(out.String(), "still waiting on health") {
+		t.Errorf("no progress line, and the driver said what it was waiting for:\n%s", out.String())
+	}
+	// And it stops when the target does: a line after the result would read as
+	// a target that is somehow both finished and still going.
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	for i, line := range lines {
+		if strings.Contains(line, "v2 in ") {
+			for _, after := range lines[i+1:] {
+				if strings.Contains(after, "still waiting") {
+					t.Errorf("progress line after the target finished:\n%s", out.String())
+				}
+			}
+		}
+	}
+}
+
+func TestAQuickTargetSaysNothingExtra(t *testing.T) {
+	// The line only exists to break a silence. A target that returns straight
+	// away has not been silent.
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	p, err := Build(context.Background(), load(t, header+`
+services:
+  purchase:
+    version: v2
+    type: ecs
+    cluster: platform
+`), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	log := console.New(&out, 0, 0)
+	if err := Apply(context.Background(), p, Options{
+		Driver:     d,
+		Hooks:      &hooks.Runner{Log: log},
+		Log:        log,
+		WaitNotice: time.Second,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "still waiting") {
+		t.Errorf("a target that finished at once printed a progress line:\n%s", out.String())
+	}
+}
+
+// discardLog is the output nearly every test wants: it has to exist, and what
+// it prints is checked elsewhere.
+func discardLog() *console.Log { return console.New(io.Discard, 0, 0) }
 
 func contains(haystack []string, needle string) bool {
 	return slices.Contains(haystack, needle)
@@ -458,8 +578,8 @@ services:
 
 	err = Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: io.Discard},
-		Out:    io.Discard,
+		Hooks:  &hooks.Runner{Log: discardLog()},
+		Log:    discardLog(),
 	})
 	if err == nil {
 		t.Fatal("expected the apply to fail")
@@ -502,8 +622,8 @@ services:
 
 	err = Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: io.Discard},
-		Out:    io.Discard,
+		Hooks:  &hooks.Runner{Log: discardLog()},
+		Log:    discardLog(),
 	})
 	if err == nil {
 		t.Fatal("expected the apply to fail")
@@ -544,8 +664,8 @@ services:
 	var out strings.Builder
 	err = Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: &out},
-		Out:    io.Discard,
+		Hooks:  &hooks.Runner{Log: console.New(&out, 0, 0)},
+		Log:    console.New(io.Discard, 0, 0),
 	})
 	if err == nil {
 		t.Fatal("expected the apply to fail")
@@ -585,8 +705,8 @@ services:
 	}
 	if err := Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: io.Discard},
-		Out:    io.Discard,
+		Hooks:  &hooks.Runner{Log: discardLog()},
+		Log:    discardLog(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -628,8 +748,8 @@ services:
 	}
 	err = Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: io.Discard},
-		Out:    io.Discard,
+		Hooks:  &hooks.Runner{Log: discardLog()},
+		Log:    discardLog(),
 	})
 	if err == nil {
 		t.Fatal("expected the apply to fail")
@@ -677,8 +797,8 @@ services:
 	}
 	if err := Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: io.Discard},
-		Out:    io.Discard,
+		Hooks:  &hooks.Runner{Log: discardLog()},
+		Log:    discardLog(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -707,8 +827,8 @@ func TestALongerChainDoesNotDeadlockOnWorkers(t *testing.T) {
 	}
 	if err := Apply(context.Background(), p, Options{
 		Driver:      d,
-		Hooks:       &hooks.Runner{Out: io.Discard},
-		Out:         io.Discard,
+		Hooks:       &hooks.Runner{Log: discardLog()},
+		Log:         discardLog(),
 		Concurrency: 1,
 	}); err != nil {
 		t.Fatal(err)

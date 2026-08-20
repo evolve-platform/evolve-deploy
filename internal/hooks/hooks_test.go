@@ -6,11 +6,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/evolve-platform/evolve-deploy/internal/console"
 )
 
 func TestRunSubstitutesAndCaptures(t *testing.T) {
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Log: console.New(&out, 0, 0)}
 
 	err := r.Run(context.Background(), "purchase", "after",
 		[]string{"echo published {{.name}} at {{.version}} to {{.env}}"},
@@ -27,7 +29,7 @@ func TestRunStopsAtTheFirstFailure(t *testing.T) {
 	// before is a gate: if the first command fails, the rest of the service
 	// must not proceed.
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Log: console.New(&out, 0, 0)}
 
 	err := r.Run(context.Background(), "purchase", "before",
 		[]string{"exit 1", "echo should-not-run"},
@@ -44,7 +46,7 @@ func TestUnknownVariableIsAnError(t *testing.T) {
 	// Rather than expanding to nothing, which would make a broken hook look
 	// like it worked.
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Log: console.New(&out, 0, 0)}
 
 	err := r.Run(context.Background(), "purchase", "after",
 		[]string{"hive publish --commit {{.nope}}"}, Vars{"version": "abc"})
@@ -55,7 +57,7 @@ func TestUnknownVariableIsAnError(t *testing.T) {
 
 func TestDryRunPrintsWithoutRunning(t *testing.T) {
 	var out bytes.Buffer
-	r := &Runner{Out: &out, DryRun: true}
+	r := &Runner{Log: console.New(&out, 0, 0), DryRun: true}
 
 	if err := r.Run(context.Background(), "purchase", "before",
 		[]string{"exit 1"}, Vars{}); err != nil {
@@ -68,7 +70,7 @@ func TestDryRunPrintsWithoutRunning(t *testing.T) {
 
 func TestOutputIsTaggedWithTheService(t *testing.T) {
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Log: console.New(&out, 0, 0)}
 
 	if err := r.Run(context.Background(), "discover", "before",
 		[]string{"echo checking schema"}, Vars{}); err != nil {
@@ -83,7 +85,7 @@ func TestTagsAreAlignedToTheWidestName(t *testing.T) {
 	// Three package managers printing at once is only readable if the tags
 	// form a column.
 	var out bytes.Buffer
-	r := &Runner{Out: &out, Width: len("discover") + 2}
+	r := &Runner{Log: console.New(&out, len("[discover]"), 0)}
 
 	for _, name := range []string{"discover", "site"} {
 		if err := r.Run(context.Background(), name, "before",
@@ -105,7 +107,7 @@ func TestATrailingPartialLineIsNotSwallowed(t *testing.T) {
 	// A hook that ends without a newline is exactly where a last error tends
 	// to sit, so it must still come out.
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Log: console.New(&out, 0, 0)}
 
 	if err := r.Run(context.Background(), "site", "after",
 		[]string{"printf 'no trailing newline'"}, Vars{}); err != nil {
@@ -121,7 +123,7 @@ func TestConcurrentHooksDoNotShredEachOther(t *testing.T) {
 	// package manager with plenty to say. No line may end up half one service
 	// and half another.
 	var out bytes.Buffer
-	r := &Runner{Out: &out, Width: len("discover") + 2}
+	r := &Runner{Log: console.New(&out, len("[discover]"), 0)}
 
 	var wg sync.WaitGroup
 	for _, name := range []string{"discover", "purchase", "site"} {
