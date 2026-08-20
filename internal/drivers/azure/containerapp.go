@@ -159,6 +159,7 @@ func (d *Driver) patchApp(
 ) error {
 	timer := logging.Start("patch container app", "name", name,
 		"containers", len(containers))
+	target.Status(ctx, "the template to be accepted")
 
 	poller, err := d.apps.BeginUpdate(ctx, d.file.Cloud.ResourceGroup, name, armappcontainers.ContainerApp{
 		Properties: &armappcontainers.ContainerAppProperties{
@@ -201,6 +202,7 @@ func (d *Driver) waitReady(ctx context.Context, name string, timeout time.Durati
 
 	slog.Debug("waiting for the revision to become ready",
 		"name", name, "timeout", timeout)
+	target.Status(ctx, "health")
 
 	for {
 		got, err := d.apps.Get(ctx, d.file.Cloud.ResourceGroup, name, nil)
@@ -247,6 +249,10 @@ func (d *Driver) waitReady(ctx context.Context, name string, timeout time.Durati
 			default:
 				strikes++
 				lastReason = reason
+				// Worth putting in the progress line and not only in the
+				// failure: a revision that is going to fail usually says so
+				// long before the deadline agrees.
+				target.Status(ctx, "health, the revision %s", reason)
 				slog.Debug("revision looks unhealthy", "name", name,
 					"revision", latest, "reason", reason,
 					"strikes", strikes, "of", unhealthyStrikes)

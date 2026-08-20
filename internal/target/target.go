@@ -96,6 +96,19 @@ type Driver interface {
 	// and returns the change needed. A nil Change means nothing to do.
 	Plan(ctx context.Context, d *Desired) (*Change, error)
 
+	// Artifacts reports which of versions have a deployable artifact for this
+	// target, keeping the order they were given in.
+	//
+	// This is the question `update` asks and planning does not: not "is this one
+	// version there" but "which of these thirty could I pick". A version whose
+	// build job failed, or whose commit never touched this service, has no
+	// image — so without this the list would offer versions that cannot be
+	// deployed, and the mistake would only surface at the next apply.
+	//
+	// Drivers that cannot list what exists for a target return
+	// ErrArtifactsUnknown, which is a missing list and not a failure.
+	Artifacts(ctx context.Context, t *config.Target, versions []string) ([]string, error)
+
 	// Apply executes the change and waits until the target is healthy. On
 	// failure it restores the previous version where the platform does not do
 	// that itself, and returns an error either way.

@@ -100,6 +100,7 @@ func (d *Driver) planECS(ctx context.Context, want *target.Desired) (*target.Cha
 func (d *Driver) applyECS(ctx context.Context, ch *target.Change) error {
 	p := ch.Payload.(*ecsPayload)
 
+	target.Status(ctx, "the task definition to be registered")
 	timer := logging.Start("register task definition", "family", ch.Target.Name)
 	registered, err := d.ecs.RegisterTaskDefinition(ctx, p.register)
 	if err != nil {
@@ -116,6 +117,7 @@ func (d *Driver) applyECS(ctx context.Context, ch *target.Change) error {
 		return fmt.Errorf("update service: %w", err)
 	}
 
+	target.Status(ctx, "the service to become stable")
 	wait := logging.Start("waiting for the service to become stable",
 		"cluster", ch.Target.Cluster, "service", ch.Target.Name, "timeout", ecsStableTimeout)
 	waiter := ecs.NewServicesStableWaiter(d.ecs)

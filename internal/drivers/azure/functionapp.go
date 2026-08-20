@@ -290,6 +290,7 @@ func (d *Driver) pushFunction(ctx context.Context, name string, p *functionPaylo
 		return nil
 
 	case modeOneDeploy:
+		target.Status(ctx, "the package to be downloaded")
 		timer := logging.Start("fetch package", "app", name, "url", p.url)
 		zip, err := d.download(ctx, p.url)
 		if err != nil {
@@ -338,6 +339,7 @@ func (d *Driver) oneDeploy(ctx context.Context, name string, zip []byte) error {
 		return err
 	}
 
+	target.Status(ctx, "the package to be accepted")
 	timer := logging.Start("one deploy", "app", name, "host", host, "bytes", len(zip))
 	if _, err := d.post(ctx,
 		"https://"+host+"/api/publish?RemoteBuild=false", zip, "application/zip"); err != nil {
@@ -389,6 +391,8 @@ func (d *Driver) waitDeployment(ctx context.Context, host string) error {
 	if err != nil {
 		return err
 	}
+
+	target.Status(ctx, "the deployment to unpack and restart")
 
 	started := time.Now()
 	deadline := started.Add(deployTimeout)

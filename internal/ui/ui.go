@@ -11,59 +11,72 @@ import (
 	"io"
 	"strings"
 
+	"github.com/evolve-platform/evolve-deploy/internal/console"
 	"github.com/evolve-platform/evolve-deploy/internal/plan"
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
 
+// NewLog returns the log every line of a run is written through, with its
+// columns sized to the plan it is about to print.
+//
+// Sizing happens once, here, because the plan and everything that follows it —
+// hook output, progress lines, failures — only read as columns if they agree on
+// how wide those columns are.
+func NewLog(w io.Writer, p *plan.Plan) *console.Log {
+	return console.New(w, tagWidth(p), labelWidth(p))
+}
+
 // RenderPlan writes a human-readable plan.
-func RenderPlan(w io.Writer, p *plan.Plan) {
+//
+// There is no per-service heading. Every line names its service in the tag
+// already, and the version it is going to is on each target's line, so a
+// heading would only repeat both.
+func RenderPlan(l *console.Log, p *plan.Plan) {
 	if p.Empty() {
-		fmt.Fprintf(w, "Nothing to do — everything in %s already runs the version it names.\n", p.File.Path)
+		l.Plain("Nothing to do — everything in %s already runs the version it names.", p.File.Path)
 		return
 	}
 
-	width := labelWidth(p)
+	l.Blank()
 
 	for _, cp := range p.Services {
 		if !cp.HasWork() {
 			continue
 		}
-		fmt.Fprintf(w, "\n%s  %s\n", cp.Service.Name, cp.Service.Version)
+		name := cp.Service.Name
 
 		for _, ch := range cp.Changes {
-			fmt.Fprintf(w, "  %-*s %s -> %s\n", width,
-				ch.Target.Label(),
-				orNone(ch.FromVersion), ch.ToVersion)
+			l.Line(name, ch.Target.Label(), "%s -> %s", orNone(ch.FromVersion), ch.ToVersion)
 
 			// The reason is only worth a line when it says something the
 			// versions above do not. "version a -> b" next to "a -> b" is half
 			// the screen spent on nothing.
 			if r := ch.Reason; r != "" && r != versionReason(ch) {
-				fmt.Fprintf(w, "  %-*s %s\n", width, "", r)
+				l.Line(name, "", "%s", r)
 			}
-			renderEnv(w, ch)
+			renderEnv(l, name, ch)
 		}
 
 		for _, t := range cp.Unchanged {
-			fmt.Fprintf(w, "  %-*s up to date\n", width, t.Label())
+			l.Line(name, t.Label(), "up to date")
 		}
 
 		// Ordering is invisible in the plan otherwise, and a service that sits
 		// there doing nothing for two minutes looks stuck rather than queued.
 		if deps := cp.Service.DependsOn; len(deps) > 0 {
-			fmt.Fprintf(w, "  %-*s %s\n", width, "waits for", strings.Join(deps, ", "))
+			l.Line(name, "waits for", "%s", strings.Join(deps, ", "))
 		}
 
 		if len(cp.Service.Before) > 0 || len(cp.Service.After) > 0 {
-			fmt.Fprintf(w, "  %-*s %d before, %d after\n", width, "hooks",
+			l.Line(name, "hooks", "%d before, %d after",
 				len(cp.Service.Before), len(cp.Service.After))
 		}
 	}
-	fmt.Fprintln(w)
+	l.Blank()
 }
 
-// labelWidth sizes the column to the longest name actually present. A fixed
-// width looked fine with two targets and falls apart at thirteen.
+// labelWidth sizes the target column to the longest name actually present. A
+// fixed width looked fine with two targets and falls apart at thirteen.
 func labelWidth(p *plan.Plan) int {
 	width := 20
 	for _, cp := range p.Services {
@@ -77,27 +90,36 @@ func labelWidth(p *plan.Plan) int {
 	return width
 }
 
-// Width exposes the plan's column width so progress lines match it.
-func Width(p *plan.Plan) int { return labelWidth(p) }
-
-func versionReason(ch *target.Change) string {
-	return fmt.Sprintf("version %s -> %s", orNone(ch.FromVersion), ch.ToVersion)
+// tagWidth sizes the [service] column. Only services with work count: a name
+// that is never printed must not indent the ones that are.
+func tagWidth(p *plan.Plan) int {
+	var width int
+	for _, cp := range p.Services {
+		if cp.HasWork() {
+			width = max(width, len(cp.Service.Name)+2)
+		}
+	}
+	return width
 }
 
-func renderEnv(w io.Writer, ch *target.Change) {
+func versionReason(ch *target.Change) string {
+	return "version " + orNone(ch.FromVersion) + " -> " + ch.ToVersion
+}
+
+func renderEnv(l *console.Log, service string, ch *target.Change) {
 	for _, name := range ch.EnvAdded {
-		fmt.Fprintf(w, "      + %s\n", name)
+		l.Line(service, "", "+ %s", name)
 	}
 	for _, name := range ch.EnvChanged {
-		fmt.Fprintf(w, "      ~ %s\n", name)
+		l.Line(service, "", "~ %s", name)
 	}
 	for _, name := range ch.EnvRemoved {
-		fmt.Fprintf(w, "      - %s\n", name)
+		l.Line(service, "", "- %s", name)
 	}
 }
 
 // Summary is the one-line result, for the end of a pipeline log.
-func Summary(w io.Writer, p *plan.Plan) {
+func Summary(l *console.Log, p *plan.Plan) {
 	var services, targets int
 	for _, cp := range p.Services {
 		if !cp.HasWork() {
@@ -109,12 +131,12 @@ func Summary(w io.Writer, p *plan.Plan) {
 	if services == 0 {
 		return
 	}
-	fmt.Fprintf(w, "%s in %s\n", pluralise(targets, "target"), pluralise(services, "service"))
+	l.Plain("%s in %s", pluralise(targets, "target"), pluralise(services, "service"))
 }
 
 func pluralise(n int, noun string) string {
 	if n == 1 {
-		return fmt.Sprintf("1 %s", noun)
+		return "1 " + noun
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
 }

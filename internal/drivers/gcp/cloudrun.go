@@ -118,6 +118,7 @@ func (d *Driver) update(ctx context.Context, name string, tmpl *runpb.RevisionTe
 
 	timer := logging.Start("update cloud run service", "name", name,
 		"containers", len(tmpl.GetContainers()), "etag", etag != "")
+	target.Status(ctx, "the new revision to become ready")
 
 	op, err := d.services.UpdateService(ctx, &runpb.UpdateServiceRequest{
 		Service:    svc,

@@ -17,7 +17,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
+	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
 	run "cloud.google.com/go/run/apiv2"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -33,6 +35,11 @@ type Driver struct {
 
 	services *run.ServicesClient
 	secrets  *secretmanager.Client
+
+	// registryClient is only needed by `update`, which asks which versions
+	// exist, so it is built on first use rather than at startup.
+	registryMu     sync.Mutex
+	registryClient *artifactregistry.Client
 }
 
 // New builds a driver from application default credentials — in CI the token

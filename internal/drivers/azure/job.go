@@ -99,6 +99,7 @@ func (d *Driver) revertJob(ctx context.Context, ch *target.Change) error {
 // discovered at the next run, not at deploy time.
 func (d *Driver) patchJob(ctx context.Context, name string, containers []*armappcontainers.Container) error {
 	timer := logging.Start("patch container app job", "name", name)
+	target.Status(ctx, "the job definition to be updated")
 
 	poller, err := d.jobs.BeginUpdate(ctx, d.file.Cloud.ResourceGroup, name, armappcontainers.JobPatchProperties{
 		Properties: &armappcontainers.JobPatchPropertiesProperties{

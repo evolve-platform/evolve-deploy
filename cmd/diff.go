@@ -38,12 +38,13 @@ definition rather than by anything in this file.`,
 			return err
 		}
 
-		ui.RenderPlan(out, p)
-		ui.Summary(out, p)
+		log := ui.NewLog(out, p)
+		ui.RenderPlan(log, p)
+		ui.Summary(log, p)
 
 		// Print the hooks that would run, since they are part of what a deploy
 		// does and are easy to forget.
-		runner := &hooks.Runner{Dir: flagDir, Out: out, DryRun: true}
+		runner := &hooks.Runner{Dir: flagDir, Log: log, DryRun: true}
 		for _, cp := range p.Services {
 			if !cp.HasWork() {
 				continue

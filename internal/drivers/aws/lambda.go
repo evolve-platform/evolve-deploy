@@ -124,6 +124,7 @@ func (d *Driver) applyLambda(ctx context.Context, ch *target.Change) error {
 }
 
 func (d *Driver) pushLambda(ctx context.Context, name, bucket, key string, env map[string]string) error {
+	target.Status(ctx, "the new code to be taken")
 	if _, err := d.lambda.UpdateFunctionCode(ctx, &lambda.UpdateFunctionCodeInput{
 		FunctionName: awssdk.String(name),
 		S3Bucket:     awssdk.String(bucket),
@@ -145,6 +146,7 @@ func (d *Driver) pushLambda(ctx context.Context, name, bucket, key string, env m
 }
 
 func (d *Driver) waitLambda(ctx context.Context, name string) error {
+	target.Status(ctx, "the function to settle")
 	waiter := lambda.NewFunctionUpdatedV2Waiter(d.lambda)
 	if err := waiter.Wait(ctx, &lambda.GetFunctionInput{
 		FunctionName: awssdk.String(name),
