@@ -10,14 +10,24 @@ cloud:
   # Only needed because a ${param:…} reference is used below.
   app_config: https://evolve-prd.azconfig.io
 
-# The default shape of a release for every service below.
 strategy:
   type: blue-green
+
+  # One gate for the whole release. It runs once, after everything has staged
+  # and before any traffic moves — so what it checks is a complete side, not one
+  # app of it.
+  #
+  # A release has no single address, so a command names what it wants. As a
+  # function and not a field: a template field has to be an identifier, and
+  # {{.catalog-commercetools.url}} does not even parse.
   smoke:
-    # {{.url}} is the staged side's own address. Retries belong in the command:
-    # the revision has just become ready, so the first call may well 503.
-    - curl -fsS --retry 5 --retry-delay 2 {{.url}}/healthz
-    - npm run smoke -- --base-url {{.url}}
+    # Retries belong in the command. The revisions have just become ready, so
+    # the first call may well 503.
+    - curl -fsS --retry 5 --retry-delay 2 {{url "purchase"}}/healthz
+    - curl -fsS --retry 5 --retry-delay 2 {{url "discover"}}/healthz
+    # And the one worth more than the sum of those: a request through the staged
+    # side, end to end.
+    - npm run smoke -- --base-url {{url "site"}}
 
 services:
   purchase:
@@ -26,13 +36,12 @@ services:
     env:
       LOG_LEVEL: info
       CTP_CLIENT_SECRET: ${secret:ctp-client-secret}
-    # Checked against what is serving now, published to where this release goes.
     before:
       - hive schema:check --service purchase --target {{.env}}
     after:
       - hive schema:publish --service purchase --target {{.env}}
 
-  # One image, five deployables. The jobs carry no traffic, so they ride along:
+  # One image, three deployables. The jobs carry no traffic, so they ride along:
   # their templates are written at the switch, never before it.
   discover:
     version: 27ec167
@@ -43,15 +52,13 @@ services:
       - { type: container-app-job, name: evolve-prd-discover-products }
       - { type: container-app-job, name: evolve-prd-discover-categories }
 
-  # No gate for a static site: it stages and switches straight away, and still
-  # gets a warm previous version to fall back to.
   site:
     version: def5678
     type: container-app
-    strategy:
-      smoke: []
 
-  # And this one is updated straight, the way everything is by default.
+  # Not every service has to be released a side at a time. This one is written
+  # straight, the way everything is by default — so it stages nothing, and the
+  # smoke commands above cannot name it.
   catalog-commercetools:
     version: 27ec167
     type: container-app

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -429,9 +431,10 @@ services:
 	}
 }
 
-// A smoke command may use url and revision, which only exist once something is
-// staged. The names still have to be checked while planning.
-func TestSmokeVariablesValidateAtPlanTime(t *testing.T) {
+// A release has no single URL, so a smoke command names what it wants. The
+// names are checked while planning, because a typo there would otherwise
+// surface after a staging phase that took minutes.
+func TestSmokeNamesAreCheckedWhilePlanning(t *testing.T) {
 	body := func(command string) string {
 		return header + `
 strategy:
@@ -446,18 +449,138 @@ services:
 `
 	}
 
-	// Only the plan is built: the point is that the names are checked before
-	// anything runs, and running it would need a real URL.
+	// Only the plan is built: no url exists yet, and running it would need one.
 	if _, err := Build(context.Background(),
-		load(t, body("curl -fsS {{.url}}/healthz # {{.revision}}")),
+		load(t, body(`curl -fsS {{url "site"}}/healthz # {{revision "site"}}`)),
 		newRolloutDriver(), nil); err != nil {
-		t.Fatalf("url and revision should be accepted while planning: %v", err)
+		t.Fatalf("a name this release stages should be accepted: %v", err)
 	}
 
+	_, err := Build(context.Background(),
+		load(t, body(`curl {{url "sight"}}`)), newRolloutDriver(), nil)
+	if err == nil {
+		t.Fatal("a name that stages nothing should fail the plan")
+	}
+	if !strings.Contains(err.Error(), "does not stage a side") ||
+		!strings.Contains(err.Error(), "site") {
+		t.Errorf("the error should say what is available, got %v", err)
+	}
+
+	// The release's own side is available too, and one release has exactly one.
 	if _, err := Build(context.Background(),
-		load(t, body("curl {{.urll}}")),
-		newRolloutDriver(), nil); err == nil {
-		t.Fatal("a mistyped smoke variable should fail the plan")
+		load(t, body("echo {{.label}} {{.previous_label}} {{.env}}")),
+		newRolloutDriver(), nil); err != nil {
+		t.Fatalf("the release side should be available: %v", err)
+	}
+}
+
+// Writing a service name as a field is the obvious first guess, it does not
+// parse, and what Go says about it is useless on its own.
+func TestSmokeExplainsTheFieldMistake(t *testing.T) {
+	_, err := Build(context.Background(), load(t, header+`
+strategy:
+  type: blue-green
+  smoke: [ "curl {{.catalog-commercetools.url}}" ]
+
+services:
+  catalog-commercetools:
+    version: new
+    type: ecs
+    cluster: platform
+`), newRolloutDriver(), nil)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), `{{url "some-service"}}`) {
+		t.Errorf("the error should say what to write instead, got %v", err)
+	}
+}
+
+// One gate for the release, not one per service. Fourteen services must not run
+// the same suite fourteen times.
+func TestSmokeRunsOncePerRelease(t *testing.T) {
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "runs")
+
+	d := newRolloutDriver()
+	p, err := Build(context.Background(), load(t, header+`
+strategy:
+  type: blue-green
+  smoke: [ "echo x >> `+counter+`" ]
+
+services:
+  a: { version: new, type: ecs, cluster: platform }
+  b: { version: new, type: ecs, cluster: platform }
+  c: { version: new, type: ecs, cluster: platform }
+`), d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	if err := Apply(context.Background(), p, Options{
+		Driver: d, Hooks: &hooks.Runner{Out: io.Discard}, Out: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatalf("the smoke command never ran: %v", err)
+	}
+	if n := strings.Count(string(raw), "x"); n != 1 {
+		t.Errorf("the smoke commands ran %d times, want once for the release", n)
+	}
+
+	// And all three were staged before it, because the side is the environment's.
+	steps := d.took()
+	firstSwitch := len(steps)
+	for i, step := range steps {
+		if strings.HasPrefix(step, "switch:") {
+			firstSwitch = i
+			break
+		}
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		if i := index(steps, "stage:"+name); i < 0 || i > firstSwitch {
+			t.Errorf("%s was not staged before the first switch: %v", name, steps)
+		}
+	}
+}
+
+// url resolves to the staged side, and a name that staged nothing is an error
+// rather than an empty string — a gate pointed at "" would pass.
+func TestSmokeUrlResolvesToTheStagedSide(t *testing.T) {
+	dir := t.TempDir()
+	seen := filepath.Join(dir, "url")
+
+	d := newRolloutDriver()
+	p, err := Build(context.Background(), load(t, header+`
+strategy:
+  type: blue-green
+  smoke: [ "echo {{url \"site\"}} > `+seen+`" ]
+
+services:
+  site:
+    version: new
+    type: ecs
+    cluster: platform
+`), d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), p, Options{
+		Driver: d, Hooks: &hooks.Runner{Out: io.Discard}, Out: &strings.Builder{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "https://site---green.example" {
+		t.Errorf("url = %q", got)
 	}
 }
 

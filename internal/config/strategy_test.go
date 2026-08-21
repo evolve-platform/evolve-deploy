@@ -51,23 +51,19 @@ services:
 
 // The file's block is the default and a service overrides it field by field, so
 // one service can opt out without restating the rest.
+// The file's block is the default and a service overrides it field by field, so
+// one service can opt out without restating the rest.
 func TestStrategyMergesPerField(t *testing.T) {
 	f, err := loadStrategy(t, azureHeader+`
 strategy:
   type: blue-green
-  smoke: [ "curl -fsS {{.url}}/healthz" ]
+  smoke: [ "curl -fsS {{url \"inherits\"}}/healthz" ]
   labels: [ one, two ]
 
 services:
   inherits:
     version: abc1234
     type: container-app
-
-  quiet:
-    version: abc1234
-    type: container-app
-    strategy:
-      smoke: []
 
   opts-out:
     version: abc1234
@@ -80,25 +76,43 @@ services:
 	}
 
 	inherits := f.Services["inherits"].Strategy
-	if !inherits.IsBlueGreen() || len(inherits.Smoke) != 1 {
+	if !inherits.IsBlueGreen() {
 		t.Errorf("inherits = %+v", inherits)
 	}
 	if got := strings.Join(inherits.Labels, ","); got != "one,two" {
 		t.Errorf("labels = %q, want the file's", got)
 	}
 
-	// An empty list is not an absent one: this is how "no smoke test here" is
-	// said without repeating everything else.
-	quiet := f.Services["quiet"].Strategy
-	if !quiet.IsBlueGreen() {
-		t.Error("quiet should still be blue-green")
-	}
-	if len(quiet.Smoke) != 0 {
-		t.Errorf("smoke = %v, want none", quiet.Smoke)
-	}
-
 	if f.Services["opts-out"].Strategy.IsBlueGreen() {
 		t.Error("opts-out asked for direct")
+	}
+
+	// The gate is the release's, so it stays on the file and is not copied onto
+	// each service where it would read as fourteen separate gates.
+	if len(f.Strategy.Smoke) != 1 {
+		t.Errorf("the file's smoke = %v", f.Strategy.Smoke)
+	}
+}
+
+// A smoke test covers a release, so there is nowhere for a per-service one to
+// go. Refusing it keeps `smoke` meaning one thing.
+func TestSmokeOnAServiceIsRefused(t *testing.T) {
+	_, err := loadStrategy(t, azureHeader+`
+strategy:
+  type: blue-green
+
+services:
+  site:
+    version: abc1234
+    type: container-app
+    strategy:
+      smoke: [ true ]
+`)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !strings.Contains(err.Error(), "gates the whole release") {
+		t.Errorf("error = %v", err)
 	}
 }
 

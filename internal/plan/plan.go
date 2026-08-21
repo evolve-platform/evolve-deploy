@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"text/template"
 
 	"golang.org/x/sync/errgroup"
 
@@ -35,6 +36,11 @@ const planConcurrency = 16
 type Plan struct {
 	File     *config.File
 	Services []*ServicePlan
+
+	// vars are the --var values. Kept on the plan as well as on each service
+	// because the smoke commands belong to the release and have no service to
+	// take them from.
+	vars map[string]string
 }
 
 // ServicePlan is one service's work. Changes holds only the targets that
@@ -83,6 +89,132 @@ func (p *Plan) EnvRemovals() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// SmokeCommands gate the release. They run once, after everything has staged
+// and before anything switches.
+//
+// Per release rather than per service, because that is what the useful test is.
+// One suite run once per service runs it fourteen times for one release, and the
+// request worth making goes through a router and touches several services at
+// once — so it belongs to none of them. A check of a single revision has not
+// been lost: it is a line in the same set, `curl -fsS {{url "purchase"}}/healthz`.
+func (p *Plan) SmokeCommands() []string {
+	if p.File.Strategy == nil || !p.Staging() {
+		return nil
+	}
+	return p.File.Strategy.Smoke
+}
+
+// Staging reports whether this release stages a side at all, which is what
+// there would be to smoke test.
+func (p *Plan) Staging() bool {
+	for _, cp := range p.Services {
+		for _, ch := range cp.Changes {
+			if ch.Sides != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Side is the side this release stages on, and Previous the one still serving.
+//
+// One value for the whole release rather than one per service: checkOneSide has
+// already refused anything else, because the side belongs to the environment.
+func (p *Plan) Side() (side, previous string) {
+	for _, cp := range p.Services {
+		for _, ch := range cp.Changes {
+			if ch.Sides != nil {
+				return ch.Sides.Idle.Label, ch.Sides.Active.Label
+			}
+		}
+	}
+	return "", ""
+}
+
+// StagedNames is every name a smoke command may ask for: each service that
+// stages a side, and each routable target.
+//
+// Both, because a service is the obvious way to name one and a target is the
+// unambiguous way — a service with two container apps stages two sides, and its
+// own name cannot mean either.
+func (p *Plan) StagedNames() []string {
+	var names []string
+	for _, cp := range p.Services {
+		var routable int
+		for _, ch := range cp.Changes {
+			if ch.Sides == nil {
+				continue
+			}
+			routable++
+			names = append(names, ch.Target.Label())
+		}
+		if routable == 1 {
+			names = append(names, cp.Service.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// SmokeVars are the values a smoke command is given besides its functions.
+func (p *Plan) SmokeVars() map[string]any {
+	side, previous := p.Side()
+	out := map[string]any{"env": p.File.Env}
+	// The tool's own names last, so a --var cannot shadow the side the release
+	// is actually going to.
+	for k, v := range p.vars {
+		out[k] = v
+	}
+	out["label"] = side
+	out["previous_label"] = previous
+	return out
+}
+
+// SmokeFuncs builds the functions a smoke command calls to name a service.
+//
+// A function rather than a field because a Go template field has to be an
+// identifier, and {{.catalog-commercetools.url}} does not even parse. One form
+// that always works beats two where one of them is a trap.
+func SmokeFuncs(lookup func(kind, name string) (string, error)) template.FuncMap {
+	fn := func(kind string) func(string) (string, error) {
+		return func(name string) (string, error) { return lookup(kind, name) }
+	}
+	return template.FuncMap{
+		"url":      fn("url"),
+		"label":    fn("label"),
+		"revision": fn("revision"),
+	}
+}
+
+// checkSmoke renders the release's smoke commands without running them.
+//
+// No url exists until something is staged, so the functions return nothing
+// here. What is checked is that the commands parse and that every name they ask
+// for is one this release will actually stage — both of which a typo gets wrong,
+// and both far better found now than after a staging phase that took minutes.
+func (p *Plan) checkSmoke() error {
+	commands := p.SmokeCommands()
+	if len(commands) == 0 {
+		return nil
+	}
+
+	names := p.StagedNames()
+	funcs := SmokeFuncs(func(_, name string) (string, error) {
+		if !slices.Contains(names, name) {
+			return "", fmt.Errorf(
+				"%q does not stage a side in this release — it stages: %s",
+				name, strings.Join(names, ", "))
+		}
+		return "", nil
+	})
+
+	if err := hooks.ValidateWith(commands, p.SmokeVars(), funcs); err != nil {
+		return fmt.Errorf("strategy.smoke: %w", err)
+	}
+	return nil
 }
 
 // HasWork reports whether anything would be deployed. Hooks do not run for a
@@ -151,7 +283,7 @@ func Build(
 	}
 	_ = g.Wait()
 
-	p := &Plan{File: f}
+	p := &Plan{File: f, vars: vars}
 	for _, cp := range plans {
 		if cp != nil {
 			p.Services = append(p.Services, cp)
@@ -169,6 +301,12 @@ func Build(
 		sort.Strings(msgs)
 		return nil, fmt.Errorf("plan failed, nothing was deployed:\n  - %s",
 			strings.Join(msgs, "\n  - "))
+	}
+
+	// Last, because the names a smoke command may use are only settled once
+	// every service has been planned and the carried ones dropped.
+	if err := p.checkSmoke(); err != nil {
+		return nil, fmt.Errorf("plan failed, nothing was deployed:\n  - %w", err)
 	}
 	return p, nil
 }
@@ -453,32 +591,14 @@ func (c *ServicePlan) checkHooks() []string {
 	for phase, commands := range map[string][]string{
 		"before": c.Service.Before,
 		"after":  c.Service.After,
-		"smoke":  c.SmokeCommands(),
 	} {
-		vars := c.HookVars()
-		if phase == "smoke" {
-			// url and revision only exist once something is staged. Standing in
-			// for them here checks the names, which is what a typo gets wrong.
-			for k, v := range map[string]string{"url": "", "revision": ""} {
-				vars[k] = v
-			}
-		}
-		if err := hooks.Validate(commands, vars); err != nil {
+		if err := hooks.Validate(commands, c.HookVars()); err != nil {
 			msgs = append(msgs, fmt.Sprintf("services.%s: %s hook: %v",
 				c.Service.Name, phase, err))
 		}
 	}
 	sort.Strings(msgs)
 	return msgs
-}
-
-// SmokeCommands are the commands that gate the switch. Only a blue-green
-// service has a staged side to run them against.
-func (c *ServicePlan) SmokeCommands() []string {
-	if !c.BlueGreen() {
-		return nil
-	}
-	return c.Service.Strategy.Smoke
 }
 
 // HookVars are the substitutions every hook of this service is given.

@@ -115,7 +115,7 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 			name: releaseNode,
 			deps: deps,
 			done: make(chan struct{}),
-			run:  func(ctx context.Context) error { return applyRelease(ctx, release, o) },
+			run:  func(ctx context.Context) error { return applyRelease(ctx, p, release, o) },
 		}
 	}
 
@@ -434,7 +434,7 @@ func changes(items []bgTarget) []*target.Change {
 // It follows that a service with nothing to change is staged too. Its revision
 // carries the same image as the one already serving; what it gives the release is
 // a side that is complete, which is what the smoke commands are pointed at.
-func applyRelease(ctx context.Context, plans []*ServicePlan, o Options) error {
+func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options) error {
 	rollout, ok := o.Driver.(target.Rollout)
 	if !ok {
 		// Refused during planning; here it would mean the plan and the apply
@@ -459,7 +459,7 @@ func applyRelease(ctx context.Context, plans []*ServicePlan, o Options) error {
 
 	staged, errs := stageAll(ctx, rollout, routable, o)
 	if len(errs) == 0 {
-		errs = smokeAll(ctx, routable, staged, o)
+		errs = smokeRelease(ctx, p, routable, staged, o)
 	}
 	if len(errs) > 0 {
 		// Nothing has served from any of this, so putting it back is free.
@@ -557,58 +557,93 @@ func stageAll(
 	return staged, errs
 }
 
-// smokeAll runs the gate against every staged side.
+// smokeRelease runs the gate once, over the whole staged side.
 //
-// Per target rather than per service, unlike before and after: those publish
-// one schema for a service with four jobs, while a smoke test talks to a URL
-// and a URL belongs to one app.
-func smokeAll(
+// Once, not once per target, because the side belongs to the environment: a
+// request through the staged router reaches the staged subgraphs, and that is
+// the thing worth checking. Running the same suite per service would run it
+// fourteen times and still only ever prove something about one app at a time.
+//
+// There is no {{.url}} for the same reason — a release has no single address —
+// so a command names what it wants: {{url "site"}}. A function rather than a
+// field because most service names have a hyphen in them and a template field
+// has to be an identifier.
+func smokeRelease(
 	ctx context.Context,
+	p *Plan,
 	items []bgTarget,
 	staged map[*target.Change]*target.Staged,
 	o Options,
 ) []string {
-	var (
-		mu   sync.Mutex
-		errs []string
-		wg   sync.WaitGroup
-	)
+	commands := p.SmokeCommands()
+	if len(commands) == 0 {
+		return nil
+	}
 
+	funcs := SmokeFuncs(stagedLookup(items, staged))
+	started := time.Now()
+
+	if err := o.Hooks.RunWith(
+		ctx, releaseNode, "smoke", commands, p.SmokeVars(), funcs); err != nil {
+		fmt.Fprintf(o.Out, "  %-*s smoke failed after %s, no traffic was moved\n",
+			o.Width, releaseNode, time.Since(started).Round(time.Second))
+		return []string{err.Error()}
+	}
+
+	fmt.Fprintf(o.Out, "  %-*s smoke passed in %s\n", o.Width,
+		releaseNode, time.Since(started).Round(time.Second))
+	return nil
+}
+
+// stagedLookup resolves a name in a smoke command to what was actually staged.
+//
+// Both a service name and a target label work. A name that staged nothing is an
+// error rather than an empty string: a smoke test quietly pointed at "" would
+// pass, and a gate that passes when it cannot reach anything is worse than no
+// gate.
+func stagedLookup(
+	items []bgTarget,
+	staged map[*target.Change]*target.Staged,
+) func(kind, name string) (string, error) {
+	byName := map[string]*target.Staged{}
+	perService := map[string]int{}
 	for _, it := range items {
-		ch, cp := it.ch, it.cp
-		commands := cp.SmokeCommands()
-		if len(commands) == 0 {
-			continue
-		}
-		got, ok := staged[ch]
+		got, ok := staged[it.ch]
 		if !ok {
 			continue
 		}
-
-		wg.Go(func() {
-			started := time.Now()
-
-			vars := cp.HookVars()
-			vars["url"] = got.URL
-			vars["label"] = got.Label
-			vars["revision"] = got.Revision
-
-			if err := o.Hooks.Run(ctx, cp.Service.Name, "smoke", commands, vars); err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Sprintf("%s: %v", ch.Target.Label(), err))
-				mu.Unlock()
-				fmt.Fprintf(o.Out, "  %-*s smoke failed after %s, no traffic was moved\n",
-					o.Width, ch.Target.Label(), time.Since(started).Round(time.Second))
-				return
-			}
-			fmt.Fprintf(o.Out, "  %-*s smoke passed in %s\n", o.Width,
-				ch.Target.Label(), time.Since(started).Round(time.Second))
-		})
+		byName[it.ch.Target.Label()] = got
+		perService[it.cp.Service.Name]++
+		byName[it.cp.Service.Name] = got
 	}
-	wg.Wait()
+	// A service with two staged sides cannot be named by its own name, because
+	// that name cannot mean either of them.
+	for name, n := range perService {
+		if n > 1 {
+			delete(byName, name)
+		}
+	}
 
-	sort.Strings(errs)
-	return errs
+	return func(kind, name string) (string, error) {
+		got, ok := byName[name]
+		if !ok {
+			known := slices.Sorted(maps.Keys(byName))
+			return "", fmt.Errorf("%q staged nothing in this release — staged: %s",
+				name, strings.Join(known, ", "))
+		}
+		switch kind {
+		case "url":
+			if got.URL == "" {
+				return "", fmt.Errorf("%q has no reachable address for its staged side", name)
+			}
+			return got.URL, nil
+		case "label":
+			return got.Label, nil
+		case "revision":
+			return got.Revision, nil
+		}
+		return "", fmt.Errorf("unknown smoke function %q", kind)
+	}
 }
 
 // switchAll moves the traffic and writes the riders in the same step.
