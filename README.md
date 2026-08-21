@@ -33,9 +33,10 @@ CLI, no Terraform, no runtime.
 ## Commands
 
 ```sh
-evolve-deploy diff  deploy/tst.yaml              # what would happen, changes nothing
-evolve-deploy diff  deploy/prd.yaml --exit-code  # non-zero if production has drifted
-evolve-deploy apply deploy/tst.yaml              # roll it out
+evolve-deploy diff    deploy/tst.yaml              # what would happen, changes nothing
+evolve-deploy diff    deploy/prd.yaml --exit-code  # non-zero if production has drifted
+evolve-deploy apply   deploy/tst.yaml              # roll it out
+evolve-deploy traffic deploy/prd.yaml              # which side is serving
 ```
 
 The config path is the only positional argument, and the only thing that decides
@@ -48,6 +49,7 @@ which environment is touched. Useful flags:
 | `-v`, `--verbose` | log every API call and every poll, to stderr |
 | `--workers N` | services rolled out at once (default 16) |
 | `--env NAME` | override what `${env}` and `{{.env}}` expand to (default: the filename) |
+| `--var name=value` | pass a value from the pipeline to hooks as `{{.name}}` (repeatable) |
 
 `diff` is read-only. It resolves every reference, checks that every image
 exists, picks the right container and compares the full desired state — so a
@@ -316,6 +318,199 @@ than counted as a failure of its own, because nothing was written for it.
 
 A `depends_on` naming a service that is not in the file, or a cycle between
 services, fails while reading the config — before anything is deployed.
+
+## Blue-green
+
+By default a new version starts serving as soon as it is ready. That covers the
+crudest failure — a container that never starts never gets traffic — and nothing
+else: a container that starts but is broken serves everyone, there is no moment
+to check anything, and going back means another pipeline run.
+
+`strategy: blue-green` stages the new version on the side that carries no
+traffic, runs a command against it, and switches in one write:
+
+```yaml
+strategy:
+  type: blue-green
+  smoke:
+    - curl -fsS --retry 5 --retry-delay 2 {{.url}}/healthz
+
+services:
+  site:
+    version: 27ec167
+    type: container-app
+
+  # No gate for this one: it stages and switches straight away.
+  catalog-commercetools:
+    version: 27ec167
+    type: container-app
+    strategy:
+      smoke: []
+
+  # And this one is updated straight, the way everything is by default.
+  purchase:
+    version: 27ec167
+    type: container-app
+    strategy:
+      type: direct
+```
+
+| Field | | |
+|---|---|---|
+| `type` | `direct` \| `blue-green` | default `direct` |
+| `smoke` | commands run against the staged side | empty = switch straight away |
+| `labels` | the two side names | default `[blue, green]` |
+| `env` | environment per side | see below |
+
+The file's block is the default and a service overrides it field by field. Lists
+and maps are replaced whole, never merged — `smoke: []` has to be sayable without
+restating everything else.
+
+### Addressing the staged side
+
+A smoke test against one staged container is worth something. A smoke test
+against the whole staged stack is worth much more, and for that a service has to
+reach *its own* side's downstream rather than whatever is live. Tagging the
+request is the wrong way round: a header only survives if the router, the reverse
+proxy and every sidecar forward it, and one that drops it produces a smoke test
+that quietly checks the old version and passes.
+
+The side is a property of the deployment, so it goes in the environment.
+`strategy.env` gives each side its own values:
+
+```yaml
+services:
+  graphql-gateway:
+    version: 27ec167
+    type: container-app
+    strategy:
+      env:
+        blue:
+          HIVE_CDN_ENDPOINT: https://cdn.graphql-hive.com/artifacts/v1/<tst-blue>
+          HIVE_CDN_KEY: ${secret:hive-cdn-blue}
+        green:
+          HIVE_CDN_ENDPOINT: https://cdn.graphql-hive.com/artifacts/v1/<tst-green>
+          HIVE_CDN_KEY: ${secret:hive-cdn-green}
+```
+
+The green router then reads the green graph, which names the green subgraph URLs,
+and the storefront staged on green calls the green router — with nothing to
+propagate and nobody to cooperate.
+
+This is **not** the same as declaring `env` on a service. That means the deploy
+owns the whole environment; this writes the variables named here over whatever
+the staged revision inherited and leaves the rest to Terraform, exactly like
+`EVOLVE_DEPLOY_SIDE` itself. References work as they do anywhere else, so the
+per-side secret is named rather than carried.
+
+Two properties worth knowing:
+
+- **The values are excluded from the environment diff.** They differ by side by
+  definition, so comparing the staged side's against the serving side's would
+  report a change on every run — which would deploy on every run and flip the
+  sides forever with no version ever changing. The plan prints which variables
+  the side sets instead.
+- **Every side must name the same variables.** The staged containers are copied
+  from the serving revision, so a variable only one side sets does not arrive
+  unset — it arrives carrying the other side's value. That is refused while
+  reading the config rather than resolved by picking a behaviour for it.
+
+**A release is one release.** Every staged service is staged first, then every
+smoke command runs, then all of the traffic moves — not stage-smoke-switch per
+service. Which means a service with nothing to change is staged as well, at the
+version it already runs: the side is a property of the environment, and a side
+missing an app is not a stack you can point a smoke test at. (A revision can
+carry only one label, so the serving revision cannot lend the idle one its own.)
+
+Two things follow. `depends_on` between two blue-green services is refused —
+staging carries no traffic, and a staged side reaches its own side by label URL
+whatever the weights say, so there is nothing left to order. And if nothing in
+the release has a real change, nothing is staged at all: a second `apply` is
+still a no-op.
+
+**Active is the label with 100% of the traffic.** There is no state and no
+marker. If no label has all of it, the tool refuses: a split means someone is in
+there by hand or a previous run died, and there is then no active side to deploy
+away from. That check runs while planning, so one odd split stops the whole
+release before anything is written.
+
+The same holds across the environment: the apps have to agree on which side is
+idle, because "green" must mean the same thing everywhere for the staged side to
+be a stack. A release where they disagree is refused, naming the
+`evolve-deploy traffic <config> --to <label>` that aligns them.
+
+A failed blue-green deploy is a non-event. The staged side never served a
+request, so recovery is switching it off:
+
+| Fails | What happens | Does a user notice? |
+|---|---|---|
+| the staged revision never becomes ready | switched off, traffic untouched | no |
+| `smoke` | switched off, traffic untouched | no |
+| the switch itself | traffic is where it was | no |
+| the cleanup afterwards | a warning; the deploy succeeded | no |
+
+The previous version stays running at 0%, which is what makes a rollback one
+write and no container start. It is cleaned up one deploy later, when its label
+moves to something new — so there is no retention setting and no cleanup
+command.
+
+⚠️ Two live versions double the compute floor for that app between releases, and
+version N and N-1 are live at the same time against the same database. That is
+the familiar expand/contract discipline and the tool can see nothing about it.
+
+There is **no gradual traffic shifting** — no 5% for a minute, then 20%. Both
+platforms can express it and this deliberately does not use it: to hold at 5%
+and then decide something you need to know the error rate at 5%, and there is no
+metrics client here. The smoke test checks the new version deliberately, against
+a URL, before anyone reaches it — a better gate than 5% of traffic and an unread
+graph.
+
+Implemented for Azure Container Apps. Asking for it anywhere else is an explicit
+"not implemented" while planning, never a silent direct update.
+
+### Which side, and telling anything about it
+
+Hooks get two more variables, named after their role in the release so they mean
+the same thing in `before` and in `after`:
+
+| | |
+|---|---|
+| `{{.label}}` | the side this release is going to |
+| `{{.previous_label}}` | the other one: what was serving, and what a rollback returns to |
+
+`smoke` additionally gets `{{.url}}` — the staged side's own address, which is
+what makes testing it possible at all — and `{{.revision}}`. On a `direct`
+service the side variables are absent rather than empty, so a hook naming one
+fails loudly instead of publishing to `tst-`. Every hook line is rendered while
+planning, so a typo in a variable name cannot fail a release that already
+succeeded.
+
+The service itself is told too: every blue-green target gets
+`EVOLVE_DEPLOY_SIDE=blue|green` in its environment. A request cannot carry the
+side — a header only arrives if every hop forwards it — but a service can resolve
+its own downstream by its own side with nothing to propagate. It is written and
+never compared: the side alternates every release, so diffing it would report a
+change on every run.
+
+### `evolve-deploy traffic`
+
+```sh
+evolve-deploy traffic deploy/prd.yaml                        # where is it now
+evolve-deploy traffic deploy/prd.yaml --only site --to blue  # back, in one write
+```
+
+Without `--to` it is read-only and answers "what is actually running". With
+`--to` it puts one label on 100% and the other on 0, in one write, waiting for
+nothing — the manual rollback, and the way out of a split. It reads the traffic
+block directly rather than through the checks `apply` uses, because the state it
+has to repair is exactly the state those checks refuse to interpret.
+
+It moves traffic only. Anything published per side — a Hive target, a schema
+registry — still describes the version that was serving before, and the command
+says so.
+
+The full design, including how this interacts with a federated GraphQL graph,
+is in [specs/blue-green.md](specs/blue-green.md).
 
 ## Waiting, failure and rollback
 

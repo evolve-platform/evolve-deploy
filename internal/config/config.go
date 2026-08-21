@@ -48,6 +48,127 @@ var typesByCloud = map[Cloud][]TargetType{
 	CloudKubernetes: {TypeHelm},
 }
 
+// StrategyType selects how a new version starts serving traffic.
+type StrategyType string
+
+const (
+	// StrategyDirect writes the new version and lets the platform route to it
+	// as soon as it is ready. This is today's behaviour and the default.
+	//
+	// It is not called "rolling" because on Container Apps and Cloud Run
+	// nothing rolls — one revision replaces another whole — and only ECS does a
+	// rolling update underneath.
+	StrategyDirect StrategyType = "direct"
+
+	// StrategyBlueGreen stages the new version on the side that carries no
+	// traffic, runs the smoke commands against it, and then switches in one
+	// write. The previous version stays running behind it, so a rollback is one
+	// write and no container start.
+	StrategyBlueGreen StrategyType = "blue-green"
+)
+
+// DefaultLabels name the two sides. Which of them carries the new version is
+// fixed nowhere and does not matter: it is whichever one has no traffic.
+var DefaultLabels = []string{"blue", "green"}
+
+// Strategy is the shape of a release. It may be set once at file level and
+// overridden per service, field by field.
+type Strategy struct {
+	Type StrategyType `yaml:"type"`
+
+	// Smoke runs against the staged side while it still carries no traffic. A
+	// non-zero exit aborts that service's release and nothing is switched.
+	//
+	// An empty list is not the same as an absent one: `smoke: []` on a service
+	// says "no smoke test here", and that has to be sayable without restating
+	// the rest of the file's block.
+	Smoke []string `yaml:"smoke"`
+
+	// Labels are the two side names. They do nothing functionally — the tool
+	// reads them to know which traffic entries are its own, and to name them in
+	// output — and exist only for a repository where Terraform bootstrapped
+	// something other than blue and green.
+	Labels []string `yaml:"labels"`
+
+	// Env is the environment a revision gets for the side it is staged on,
+	// keyed by label. It is how a staged side addresses its own downstream: the
+	// router on the green side reads the green graph, the storefront on the
+	// green side calls the green router, and nothing has to propagate a header
+	// for that to hold.
+	//
+	// Additive, and deliberately not the same thing as a service's `env`: that
+	// one means the deploy owns the whole environment, while this writes the
+	// variables named here over whatever the revision inherited and leaves the
+	// rest to Terraform. A side that names a variable the other does not is an
+	// error rather than a merge, because the staged containers are copied from
+	// the serving revision and the other side's value would come along.
+	Env map[string]map[string]string `yaml:"env"`
+}
+
+// SideEnvNames is every variable named by any side, which is the set the tool
+// writes. A variable is set from the staged side when that side declares it, and
+// the validation below makes sure both sides always do.
+func (s *Strategy) SideEnvNames() []string {
+	if s == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, vars := range s.Env {
+		for name := range vars {
+			seen[name] = true
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ReleaseName is what a staged release is called where a service name would
+// otherwise go. Parenthesised so it reads as not-a-service, and reserved so it
+// cannot be one.
+const ReleaseName = "(release)"
+
+// SideEnvVar is the name the tool writes the side into. Declared here so the
+// config can reject a hand-written one; the reasoning lives on
+// target.SideEnvVar.
+const SideEnvVar = "EVOLVE_DEPLOY_SIDE"
+
+// IsBlueGreen is the question every caller actually has.
+func (s *Strategy) IsBlueGreen() bool { return s != nil && s.Type == StrategyBlueGreen }
+
+// merge layers a service's block over the file's.
+//
+// Lists are replaced whole rather than appended. A service that wants no smoke
+// test has to be able to say so without repeating everything else, and
+// appending would make that impossible to express.
+func (s *Strategy) merge(over *Strategy) *Strategy {
+	var out Strategy
+	if s != nil {
+		out = *s
+	}
+	if over != nil {
+		if over.Type != "" {
+			out.Type = over.Type
+		}
+		if over.Smoke != nil {
+			out.Smoke = over.Smoke
+		}
+		if over.Labels != nil {
+			out.Labels = over.Labels
+		}
+		// Replaced whole, like the lists: a service that addresses its own
+		// downstream by side has nothing in common with the file's default, and
+		// half-inheriting a map of URLs is never what was meant.
+		if over.Env != nil {
+			out.Env = over.Env
+		}
+	}
+	return &out
+}
+
 // ResolvePolicy controls what happens when a ref cannot be passed through to the
 // platform natively and would have to be read by the tool instead.
 type ResolvePolicy string
@@ -67,7 +188,12 @@ const (
 type File struct {
 	Cloud CloudConfig `yaml:"cloud"`
 
-	Refs     RefConfig           `yaml:"refs"`
+	Refs RefConfig `yaml:"refs"`
+
+	// Strategy is the default shape of a release for every service in this
+	// file. A service may override it field by field.
+	Strategy *Strategy `yaml:"strategy"`
+
 	Services map[string]*Service `yaml:"services"`
 
 	// Env is the environment name (tst/acc/prd), taken from the filename rather
@@ -138,6 +264,10 @@ type Service struct {
 	Container string `yaml:"container"`
 	Code      *Code  `yaml:"code"`
 
+	// Strategy overrides the file's block for this service, field by field.
+	// After normalisation it is the effective strategy and is never nil.
+	Strategy *Strategy `yaml:"strategy"`
+
 	// Hooks run once per service, not per target — publishing a schema five
 	// times for a service with four jobs is not what anyone wants.
 	Before []string `yaml:"before"`
@@ -152,6 +282,11 @@ type Service struct {
 	DependsOn []string `yaml:"depends_on"`
 
 	Name string `yaml:"-"`
+
+	// strategyRaw is what this service's own block said, kept because
+	// normalisation replaces Strategy with the merged result and validation
+	// still needs to see what was actually written where.
+	strategyRaw *Strategy
 }
 
 // Target is a single deployable resource.
@@ -184,6 +319,11 @@ type Target struct {
 	// Service is set during normalisation so a target can report where it
 	// came from without a back-pointer to the whole service.
 	Service string `yaml:"-"`
+
+	// Strategy is the service's effective strategy, copied here during
+	// normalisation. A driver is handed targets, not services, and it needs the
+	// label names to know which traffic entries are the tool's own.
+	Strategy *Strategy `yaml:"-"`
 
 	// ManagesEnv records whether the config said anything about environment
 	// variables at all.
@@ -256,6 +396,17 @@ func (f *File) normalise() {
 		}
 		c.Name = name
 
+		// The effective strategy is the file's block with this service's laid
+		// over it, so the rest of the tool reads one place and never nil.
+		c.strategyRaw = c.Strategy
+		c.Strategy = f.Strategy.merge(c.Strategy)
+		if c.Strategy.Type == "" {
+			c.Strategy.Type = StrategyDirect
+		}
+		if c.Strategy.Labels == nil {
+			c.Strategy.Labels = slices.Clone(DefaultLabels)
+		}
+
 		// Short form: `type: ecs` means one target named after the service.
 		// That covers the large majority of services; only those with jobs or a
 		// sidecar lambda need to spell out a list.
@@ -265,6 +416,7 @@ func (f *File) normalise() {
 
 		for _, t := range c.Targets {
 			t.Service = name
+			t.Strategy = c.Strategy
 			if t.Name == "" {
 				t.Name = name
 			}
@@ -331,6 +483,10 @@ func (f *File) validate() error {
 		add("%s", msg)
 	}
 
+	for _, msg := range validateStrategy("strategy", f.Strategy) {
+		add("%s", msg)
+	}
+
 	if len(f.Services) == 0 {
 		add("services: no services defined")
 	}
@@ -344,11 +500,22 @@ func (f *File) validate() error {
 		if c.Version == "" {
 			add("services.%s: version is required", name)
 		}
+		// The name a staged release is reported under, so a service cannot take
+		// it: the failure list would name two different things the same.
+		if name == ReleaseName {
+			add("services.%s: %q is reserved — it is what the staged release is called",
+				name, ReleaseName)
+		}
 		if c.Type == "" && len(c.Targets) == 0 {
 			add("services.%s: needs either `type` (one target) or `targets`", name)
 		}
 		if c.Type != "" && len(c.Targets) > 1 {
 			add("services.%s: set either `type` or `targets`, not both", name)
+		}
+
+		for _, msg := range validateStrategy(
+			fmt.Sprintf("services.%s.strategy", name), c.strategyRaw) {
+			add("%s", msg)
 		}
 
 		seen := map[string]bool{}
@@ -386,6 +553,13 @@ func (f *File) validate() error {
 				add("%s: `code` only applies to lambda and function-app targets", where)
 			}
 
+			// The tool writes this one itself on a blue-green target, and the
+			// environment diff ignores it on purpose — so a config that also
+			// set it would be changing something nothing would ever report.
+			if _, ok := t.Env[SideEnvVar]; ok {
+				add("%s: env.%s is written by the tool and cannot be set here", where, SideEnvVar)
+			}
+
 			switch t.Type {
 			case TypeECS:
 				if t.Cluster == "" {
@@ -418,6 +592,99 @@ func (f *File) validate() error {
 		return fmt.Errorf("%s is invalid:\n  - %s", f.Path, strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+// validateStrategy checks one strategy block as it was written.
+//
+// Both the file's block and a service's own are checked, rather than the merged
+// result: a bad value at file level would otherwise be reported once per
+// service, and a block that contradicts itself is only visible before the merge
+// flattens it.
+func validateStrategy(where string, s *Strategy) []string {
+	if s == nil {
+		return nil
+	}
+
+	var msgs []string
+	switch s.Type {
+	case "", StrategyDirect, StrategyBlueGreen:
+	default:
+		msgs = append(msgs, fmt.Sprintf(
+			"%s.type: %q is not one of direct, blue-green", where, s.Type))
+	}
+
+	// Smoke commands run against a staged side, and a direct release never
+	// stages one. Written together in one block that is a contradiction, not an
+	// inherited default that happens to go unused.
+	if s.Type == StrategyDirect && len(s.Smoke) > 0 {
+		msgs = append(msgs, fmt.Sprintf(
+			"%s: `smoke` needs a staged side to run against, which `type: direct` never creates",
+			where))
+	}
+
+	// Per-side environment needs sides to exist.
+	if s.Type == StrategyDirect && len(s.Env) > 0 {
+		msgs = append(msgs, fmt.Sprintf(
+			"%s: `env` per side needs sides, which `type: direct` never has", where))
+	}
+
+	labels := s.Labels
+	if labels == nil {
+		labels = DefaultLabels
+	}
+	for side, vars := range s.Env {
+		if !slices.Contains(labels, side) {
+			msgs = append(msgs, fmt.Sprintf(
+				"%s.env.%s: %q is not one of the sides (%s)",
+				where, side, side, strings.Join(labels, ", ")))
+			continue
+		}
+		if _, ok := vars[SideEnvVar]; ok {
+			msgs = append(msgs, fmt.Sprintf(
+				"%s.env.%s.%s: written by the tool and cannot be set here",
+				where, side, SideEnvVar))
+		}
+	}
+
+	// Every side has to name the same variables. The staged containers are
+	// copied from the serving revision, so a variable only one side sets is not
+	// "unset on the other" — it is the other side's value, silently inherited.
+	// The tool could delete it instead, but a config that lists a downstream URL
+	// for one side and not the other is a mistake either way, and saying so is
+	// worth more than picking a behaviour for it.
+	if len(s.Env) > 0 {
+		for _, name := range s.SideEnvNames() {
+			var missing []string
+			for _, side := range labels {
+				if _, ok := s.Env[side][name]; !ok {
+					missing = append(missing, side)
+				}
+			}
+			if len(missing) > 0 {
+				msgs = append(msgs, fmt.Sprintf(
+					"%s.env: %s is set for some sides but not %s — every side must name it",
+					where, name, strings.Join(missing, " or ")))
+			}
+		}
+	}
+
+	if s.Labels != nil {
+		switch {
+		case len(s.Labels) != 2:
+			msgs = append(msgs, fmt.Sprintf(
+				"%s.labels: needs exactly two names, got %d", where, len(s.Labels)))
+		case s.Labels[0] == "":
+			msgs = append(msgs, fmt.Sprintf("%s.labels[0]: is empty", where))
+		case s.Labels[1] == "":
+			msgs = append(msgs, fmt.Sprintf("%s.labels[1]: is empty", where))
+		case s.Labels[0] == s.Labels[1]:
+			msgs = append(msgs, fmt.Sprintf(
+				"%s.labels: both sides are called %q", where, s.Labels[0]))
+		}
+	}
+
+	sort.Strings(msgs)
+	return msgs
 }
 
 // validateAddressing checks that the fields naming the destination are present
@@ -475,9 +742,12 @@ func (f *File) validateAddressing() []string {
 // validateDependencies checks that every depends_on names a service in this
 // file, and that the graph has no cycle.
 //
-// Both belong here rather than at apply time: they are properties of the file,
-// knowable by reading it, and a release must not get halfway through before
-// discovering that two services are each waiting for the other.
+// It also refuses an edge between two blue-green services, where ordering means
+// nothing.
+//
+// All of it belongs here rather than at apply time: they are properties of the
+// file, knowable by reading it, and a release must not get halfway through
+// before discovering that two services are each waiting for the other.
 func (f *File) validateDependencies() []string {
 	var msgs []string
 
@@ -493,6 +763,25 @@ func (f *File) validateDependencies() []string {
 			case f.Services[dep] == nil:
 				msgs = append(msgs, fmt.Sprintf(
 					"services.%s: depends_on %q, which is not a service in this file", name, dep))
+
+			// Between two staged services there is nothing left to order.
+			// Staging carries no traffic, and a staged side reaches its own side
+			// by label URL whatever the weights say, so the whole side is
+			// complete and checked before any of it serves — that is the point
+			// of releasing it as one. Waiting would only serialise the staging,
+			// which is the slow part. An edge is refused rather than ignored
+			// because a `depends_on` that quietly does nothing is worse than one
+			// that is wrong.
+			//
+			// An edge with a `direct` service on either end still means
+			// something: there is no other side to address there, so that one
+			// really does go live before or after.
+			case c.Strategy.IsBlueGreen() && f.Services[dep].Strategy.IsBlueGreen():
+				msgs = append(msgs, fmt.Sprintf(
+					"services.%s: depends_on %q, and both are blue-green — "+
+						"the whole side is staged and checked before any of it serves, "+
+						"so there is nothing to order",
+					name, dep))
 			}
 		}
 	}

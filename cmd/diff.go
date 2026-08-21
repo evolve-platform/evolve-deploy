@@ -33,7 +33,12 @@ definition rather than by anything in this file.`,
 			return err
 		}
 
-		p, err := plan.Build(ctx, f, driver)
+		vars, err := hookVars(flagVar)
+		if err != nil {
+			return err
+		}
+
+		p, err := plan.Build(ctx, f, driver, vars)
 		if err != nil {
 			return err
 		}

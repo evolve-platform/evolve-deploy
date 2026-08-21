@@ -187,7 +187,7 @@ services:
       CTP_CLIENT_SECRET: ${secret:purchase/ctp}
 `)
 
-	if _, err := Build(context.Background(), f, d); err != nil {
+	if _, err := Build(context.Background(), f, d, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -220,7 +220,7 @@ services:
       CTP_CLIENT_SECRET: ${secret:purchase/ctp}
 `)
 
-	if _, err := Build(context.Background(), f, d); err != nil {
+	if _, err := Build(context.Background(), f, d, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -255,7 +255,7 @@ services:
       CTP_CLIENT_SECRET: ${secret:purchase/ctp}
 `)
 
-	_, err := Build(context.Background(), f, d)
+	_, err := Build(context.Background(), f, d, nil)
 	if err == nil {
 		t.Fatal("expected the plan to fail under refs.resolve: deny")
 	}
@@ -284,7 +284,7 @@ services:
       LOG_LEVEL: debug
 `)
 
-	if _, err := Build(context.Background(), f, d); err != nil {
+	if _, err := Build(context.Background(), f, d, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -315,7 +315,7 @@ services:
       - ${secret:bundle}
 `)
 
-	_, err := Build(context.Background(), f, d)
+	_, err := Build(context.Background(), f, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "envFrom takes ${param:") {
 		t.Fatalf("error was: %v", err)
 	}
@@ -339,7 +339,7 @@ services:
       MISSING: ${param:/nope}
 `)
 
-	_, err := Build(context.Background(), f, d)
+	_, err := Build(context.Background(), f, d, nil)
 	if err == nil {
 		t.Fatal("expected the plan to fail")
 	}
@@ -364,7 +364,7 @@ services:
     cluster: platform
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +399,7 @@ services:
     cluster: platform
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +451,7 @@ services:
     before: ["true"]
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +495,7 @@ services:
     before: ["exit 1"]
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +536,7 @@ services:
     after: ["echo published-site"]
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +579,7 @@ services:
     cluster: platform
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ services:
     cluster: platform
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +671,7 @@ services:
     cluster: platform
 `)
 
-	p, err := Build(context.Background(), f, d)
+	p, err := Build(context.Background(), f, d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,7 +701,7 @@ func TestALongerChainDoesNotDeadlockOnWorkers(t *testing.T) {
 		}
 	}
 
-	p, err := Build(context.Background(), load(t, body), d)
+	p, err := Build(context.Background(), load(t, body), d, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

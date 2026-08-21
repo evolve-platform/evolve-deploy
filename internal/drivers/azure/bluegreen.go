@@ -1,0 +1,559 @@
+package azure
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"slices"
+	"sort"
+	"strings"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appcontainers/armappcontainers/v3"
+
+	"github.com/evolve-platform/evolve-deploy/internal/config"
+	"github.com/evolve-platform/evolve-deploy/internal/image"
+	"github.com/evolve-platform/evolve-deploy/internal/logging"
+	"github.com/evolve-platform/evolve-deploy/internal/target"
+)
+
+// weightAll and weightNone are the only two weights this tool writes. There is
+// no gradual shift: a canary without metrics is a stopwatch, and there are no
+// metrics here.
+const (
+	weightAll  int32 = 100
+	weightNone int32 = 0
+)
+
+// bgPayload is what a blue-green change carries from Plan to Apply.
+type bgPayload struct {
+	// containers is the template for the new revision, built from the template
+	// of the revision that is *serving* rather than from the app's own — see
+	// planAppBlueGreen.
+	containers []*armappcontainers.Container
+
+	// fqdn is the app's ingress hostname, which the label URL is derived from.
+	fqdn string
+
+	// staged is filled in by Stage and read by Switch, Abandon and Settle.
+	staged string
+}
+
+// Routable reports which target types carry traffic.
+//
+// A container app job has no ingress and nothing to split, and a function app
+// has slots rather than labels. Both can still be part of a blue-green service:
+// they ride along and are written at the switch.
+func (d *Driver) Routable(t config.TargetType) bool {
+	return t == config.TypeContainerApp
+}
+
+// Sides reads the current split off the app.
+func (d *Driver) Sides(ctx context.Context, t *config.Target) (*target.Sides, error) {
+	app, err := d.getApp(ctx, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	return d.sidesOf(ctx, t, app)
+}
+
+func (d *Driver) sidesOf(
+	ctx context.Context,
+	t *config.Target,
+	app *armappcontainers.ContainerApp,
+) (*target.Sides, error) {
+	cfg := app.Properties.Configuration
+	if cfg == nil {
+		return nil, fmt.Errorf("container app %s has no configuration", t.Name)
+	}
+
+	// Single-revision mode has no labels and nothing to divide. Terraform owns
+	// this setting, so the tool reports it rather than changing it.
+	if cfg.ActiveRevisionsMode == nil ||
+		*cfg.ActiveRevisionsMode != armappcontainers.ActiveRevisionsModeMultiple {
+		mode := "an unset"
+		if cfg.ActiveRevisionsMode != nil {
+			mode = string(*cfg.ActiveRevisionsMode)
+		}
+		return nil, fmt.Errorf(
+			"container app %s is in %s revision mode; blue-green needs Multiple "+
+				"(set revision_mode = \"Multiple\" in Terraform)", t.Name, mode)
+	}
+	if cfg.Ingress == nil {
+		return nil, fmt.Errorf(
+			"container app %s has no ingress, so it carries no traffic to divide", t.Name)
+	}
+
+	sides, err := readSides(cfg.Ingress.Traffic, t.Strategy.Labels)
+	if err != nil {
+		return nil, fmt.Errorf("container app %s: %w", t.Name, err)
+	}
+
+	// The version that is running is the tag on the revision that is serving,
+	// not the tag in the app's template. With two live revisions the template
+	// is whichever was created last, which after a failed deploy is the one
+	// that was thrown away.
+	if sides.Active.Revision != "" {
+		if tmpl, err := d.revisionTemplate(ctx, t.Name, sides.Active.Revision); err == nil {
+			name, err := target.PickContainer(
+				containerNames(tmpl.Containers), t.Container, appContainer)
+			if err == nil {
+				if c := findContainer(tmpl.Containers, name); c != nil {
+					sides.Active.Version = image.Tag(derefString(c.Image))
+				}
+			}
+		} else {
+			slog.Debug("could not read the serving revision", "app", t.Name,
+				"revision", sides.Active.Revision, "err", err)
+		}
+	}
+	return sides, nil
+}
+
+// readSides applies the one rule this whole feature rests on: active is the
+// label carrying 100% of the traffic, and anything else is a refusal.
+//
+// A split means someone is in here by hand or a previous run died. There is
+// then no active side to deploy away from, and carrying on would mean the tool
+// deciding for itself which of the two revisions it may throw away.
+func readSides(traffic []*armappcontainers.TrafficWeight, labels []string) (*target.Sides, error) {
+	if len(labels) != 2 {
+		return nil, fmt.Errorf("strategy.labels needs exactly two names, got %d", len(labels))
+	}
+
+	var (
+		serving []*armappcontainers.TrafficWeight
+		byLabel = map[string]*armappcontainers.TrafficWeight{}
+	)
+	for _, w := range traffic {
+		if w == nil {
+			continue
+		}
+		if derefInt32(w.Weight) > 0 {
+			serving = append(serving, w)
+		}
+		if l := derefString(w.Label); l != "" {
+			byLabel[l] = w
+		}
+	}
+
+	if len(serving) != 1 || derefInt32(serving[0].Weight) != weightAll {
+		return nil, fmt.Errorf(
+			"traffic is split, so there is no active side:\n%s\n"+
+				"    resolve it first with `evolve-deploy traffic <config> --to %s`",
+			describeTraffic(traffic), labels[0])
+	}
+
+	active := serving[0]
+	label := derefString(active.Label)
+	if label == "" {
+		return nil, fmt.Errorf(
+			"100%% of the traffic goes to an entry with no label, so there is "+
+				"nothing to fall back to:\n%s", describeTraffic(traffic))
+	}
+	idx := slices.Index(labels, label)
+	if idx < 0 {
+		return nil, fmt.Errorf(
+			"the label carrying all the traffic is %q, which is not one of %s:\n%s",
+			label, strings.Join(labels, " or "), describeTraffic(traffic))
+	}
+
+	idleLabel := labels[1-idx]
+	sides := &target.Sides{
+		Active: target.Side{
+			Label:    label,
+			Revision: derefString(active.RevisionName),
+		},
+		// The idle label may not exist yet: an app that has only ever been
+		// deployed once has one side and no other.
+		Idle: target.Side{Label: idleLabel},
+		// "Whatever is newest" is a rule, not a reference. While it stands,
+		// every new revision takes all the traffic the moment it exists — so it
+		// has to become a fact before anything is staged.
+		PinNeeded: derefBool(active.LatestRevision),
+	}
+	if w, ok := byLabel[idleLabel]; ok {
+		sides.Idle.Revision = derefString(w.RevisionName)
+	}
+	return sides, nil
+}
+
+// describeTraffic renders a traffic block for an error message. Whoever reads a
+// refusal needs to see what was actually there.
+func describeTraffic(traffic []*armappcontainers.TrafficWeight) string {
+	if len(traffic) == 0 {
+		return "      (the traffic block is empty)"
+	}
+	var lines []string
+	for _, w := range traffic {
+		if w == nil {
+			continue
+		}
+		revision := derefString(w.RevisionName)
+		if derefBool(w.LatestRevision) {
+			revision = "(latest)"
+		}
+		lines = append(lines, fmt.Sprintf("      %-8s %-40s %d%%",
+			orNone(derefString(w.Label)), orNone(revision), derefInt32(w.Weight)))
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
+}
+
+// weights builds a traffic block. A side with no revision is left out: a label
+// cannot point at nothing.
+func weights(entries ...trafficEntry) []*armappcontainers.TrafficWeight {
+	out := make([]*armappcontainers.TrafficWeight, 0, len(entries))
+	for _, e := range entries {
+		if e.side.Revision == "" {
+			continue
+		}
+		out = append(out, &armappcontainers.TrafficWeight{
+			RevisionName: to.Ptr(e.side.Revision),
+			Label:        to.Ptr(e.side.Label),
+			Weight:       to.Ptr(e.weight),
+		})
+	}
+	return out
+}
+
+type trafficEntry struct {
+	side   target.Side
+	weight int32
+}
+
+// labelURL turns the app's hostname into the label's own.
+//
+// A label FQDN is not returned by the API, so it is assembled: evolve-tst-site
+// .<domain> becomes evolve-tst-site---green.<domain>. That address is what makes
+// a smoke test possible at all — a revision with no traffic is still reachable
+// through its label.
+func labelURL(fqdn, label string) string {
+	if fqdn == "" || label == "" {
+		return ""
+	}
+	host, domain, ok := strings.Cut(fqdn, ".")
+	if !ok {
+		return ""
+	}
+	return "https://" + host + "---" + label + "." + domain
+}
+
+// getApp reads an app and checks the parts every caller needs are present.
+func (d *Driver) getApp(ctx context.Context, name string) (*armappcontainers.ContainerApp, error) {
+	timer := logging.Start("get container app", "name", name)
+	got, err := d.apps.Get(ctx, d.file.Cloud.ResourceGroup, name, nil)
+	if err != nil {
+		return nil, fmt.Errorf("container app %s: %w", name, err)
+	}
+	timer.Done()
+
+	if got.Properties == nil || got.Properties.Template == nil {
+		return nil, fmt.Errorf("container app %s has no template", name)
+	}
+	return &got.ContainerApp, nil
+}
+
+// revisionTemplate reads one revision's own template.
+//
+// This is the read that makes blue-green correct rather than nearly correct.
+// With two live revisions the app's template is whichever was created last —
+// after a failed deploy, the one that was abandoned. Building on that would
+// leak a failed attempt's environment into the next release, and comparing
+// against it would report "already up to date" for a version that never
+// shipped.
+func (d *Driver) revisionTemplate(
+	ctx context.Context,
+	app, revision string,
+) (*armappcontainers.Template, error) {
+	got, err := d.revisions.GetRevision(ctx, d.file.Cloud.ResourceGroup, app, revision, nil)
+	if err != nil {
+		return nil, fmt.Errorf("revision %s: %w", revision, err)
+	}
+	if got.Properties == nil || got.Properties.Template == nil {
+		return nil, fmt.Errorf("revision %s has no template", revision)
+	}
+	return got.Properties.Template, nil
+}
+
+// Stage creates the new revision and points the idle label at it.
+//
+// The order of the writes is the whole story. While the active label says
+// "whatever is newest", every revision created takes all the traffic the moment
+// it exists — before the smoke test, before a weight is written. So the pin
+// comes first, in a write of its own, and only then is a revision created.
+func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, error) {
+	p := ch.Payload.(*bgPayload)
+	name := ch.Target.Name
+
+	if ch.Sides.PinNeeded {
+		slog.Debug("pinning the active label before staging",
+			"app", name, "label", ch.Sides.Active.Label,
+			"revision", ch.Sides.Active.Revision)
+		if err := d.patchTraffic(ctx, name, weights(
+			trafficEntry{ch.Sides.Active, weightAll},
+			trafficEntry{ch.Sides.Idle, weightNone},
+		)); err != nil {
+			return nil, fmt.Errorf("pinning %s before staging: %w", ch.Sides.Active.Label, err)
+		}
+	}
+
+	if err := d.patchApp(ctx, name, p.containers, readyTimeout); err != nil {
+		return nil, err
+	}
+
+	// The revision that just became ready is the one to label. Read back rather
+	// than derived: the suffix is the platform's to choose.
+	app, err := d.getApp(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	staged := derefString(app.Properties.LatestReadyRevisionName)
+	if staged == "" {
+		return nil, fmt.Errorf("container app %s reported no ready revision after staging", name)
+	}
+	p.staged = staged
+
+	if err := d.patchTraffic(ctx, name, weights(
+		trafficEntry{ch.Sides.Active, weightAll},
+		trafficEntry{target.Side{Label: ch.Sides.Idle.Label, Revision: staged}, weightNone},
+	)); err != nil {
+		return nil, fmt.Errorf("attaching label %s to %s: %w", ch.Sides.Idle.Label, staged, err)
+	}
+
+	return &target.Staged{
+		Label:    ch.Sides.Idle.Label,
+		Revision: staged,
+		URL:      labelURL(p.fqdn, ch.Sides.Idle.Label),
+	}, nil
+}
+
+// Switch hands the staged side all of the traffic, in one write.
+func (d *Driver) Switch(ctx context.Context, ch *target.Change) error {
+	p := ch.Payload.(*bgPayload)
+	return d.patchTraffic(ctx, ch.Target.Name, weights(
+		trafficEntry{target.Side{Label: ch.Sides.Idle.Label, Revision: p.staged}, weightAll},
+		trafficEntry{ch.Sides.Active, weightNone},
+	))
+}
+
+// Abandon restores the traffic block exactly as it was and deactivates the
+// revision that never served anything.
+//
+// This is the path that makes a failed blue-green deploy a non-event: nothing
+// anyone saw has happened, and the recovery is switching off a revision that
+// handled no requests. Restoring the idle label to what it pointed at before
+// matters — staging moved it, and leaving it on an abandoned revision would
+// make the next release's rollback target a version that never worked.
+func (d *Driver) Abandon(ctx context.Context, ch *target.Change) error {
+	p := ch.Payload.(*bgPayload)
+
+	err := d.patchTraffic(ctx, ch.Target.Name, weights(
+		trafficEntry{ch.Sides.Active, weightAll},
+		trafficEntry{ch.Sides.Idle, weightNone},
+	))
+	if p.staged != "" {
+		// Deactivated even when the traffic write failed: the revision is
+		// unwanted either way, and leaving it running costs money for nothing.
+		if dErr := d.deactivate(ctx, ch.Target.Name, p.staged); dErr != nil && err == nil {
+			err = dErr
+		}
+	}
+	return err
+}
+
+// Settle switches off everything that is not one of the two labelled revisions.
+//
+// The traffic half of the invariant is already in place: Switch writes the
+// canonical two-entry block, which also drops any leftover entry a run that
+// died halfway left behind. So this is the deactivation, and repeating the
+// write here would be a second ARM round trip that changes nothing.
+//
+// The previous version deliberately stays — at 0%, labelled, running — because
+// that is what makes a rollback one write and no container start. It goes away
+// one deploy later, when its label moves to something new.
+func (d *Driver) Settle(ctx context.Context, ch *target.Change) error {
+	p := ch.Payload.(*bgPayload)
+	return d.deactivateRest(ctx, ch.Target.Name,
+		[]string{p.staged, ch.Sides.Active.Revision})
+}
+
+// Point puts all the traffic on one label without staging anything.
+//
+// It reads the traffic block directly instead of going through Sides, and that
+// is deliberate: the state this has to repair is exactly the state Sides
+// refuses to interpret.
+func (d *Driver) Point(ctx context.Context, t *config.Target, label string) error {
+	app, err := d.getApp(ctx, t.Name)
+	if err != nil {
+		return err
+	}
+	cfg := app.Properties.Configuration
+	if cfg == nil || cfg.Ingress == nil {
+		return fmt.Errorf("container app %s has no ingress", t.Name)
+	}
+
+	next, err := pointTraffic(cfg.Ingress.Traffic, label)
+	if err != nil {
+		return fmt.Errorf("container app %s: %w", t.Name, err)
+	}
+	return d.patchTraffic(ctx, t.Name, next)
+}
+
+// pointTraffic rewrites a block so the named label carries everything.
+func pointTraffic(
+	traffic []*armappcontainers.TrafficWeight,
+	label string,
+) ([]*armappcontainers.TrafficWeight, error) {
+	var (
+		out   []*armappcontainers.TrafficWeight
+		found bool
+		names []string
+	)
+	for _, w := range traffic {
+		if w == nil {
+			continue
+		}
+		l := derefString(w.Label)
+		if l == "" {
+			// An unlabelled entry has no name to point at and is not something
+			// this command can hand traffic to. Dropping it is the intent:
+			// afterwards exactly one labelled side serves.
+			continue
+		}
+		names = append(names, l)
+
+		weight := weightNone
+		if l == label {
+			weight = weightAll
+			found = true
+		}
+		next := *w
+		next.Weight = to.Ptr(weight)
+		// A pin, if it was not one already: "whatever is newest" cannot be a
+		// resting state for either side.
+		next.LatestRevision = nil
+		out = append(out, &next)
+	}
+
+	if !found {
+		sort.Strings(names)
+		return nil, fmt.Errorf("no traffic label named %q (found %s)",
+			label, orNone(strings.Join(names, ", ")))
+	}
+	return out, nil
+}
+
+// patchTraffic writes only the traffic block.
+//
+// A merge patch for the same reason the template write is one: a read never
+// returns secret values, so writing the whole resource back would blank every
+// secret Terraform declared. Sending just this leaves the rest of the ingress —
+// port, external, sticky sessions — exactly as it is.
+func (d *Driver) patchTraffic(
+	ctx context.Context,
+	name string,
+	traffic []*armappcontainers.TrafficWeight,
+) error {
+	timer := logging.Start("patch container app traffic", "name", name,
+		"entries", len(traffic))
+
+	poller, err := d.apps.BeginUpdate(ctx, d.file.Cloud.ResourceGroup, name,
+		armappcontainers.ContainerApp{
+			Properties: &armappcontainers.ContainerAppProperties{
+				Configuration: &armappcontainers.Configuration{
+					Ingress: &armappcontainers.Ingress{Traffic: traffic},
+				},
+			},
+		}, nil)
+	if err != nil {
+		return fmt.Errorf("traffic update: %w", err)
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+		return fmt.Errorf("traffic update: %w", err)
+	}
+	timer.Done()
+	return nil
+}
+
+func (d *Driver) deactivate(ctx context.Context, app, revision string) error {
+	timer := logging.Start("deactivate revision", "app", app, "revision", revision)
+	if _, err := d.revisions.DeactivateRevision(
+		ctx, d.file.Cloud.ResourceGroup, app, revision, nil); err != nil {
+		return fmt.Errorf("deactivating %s: %w", revision, err)
+	}
+	timer.Done()
+	return nil
+}
+
+// deactivateRest switches off every active revision that is not one of the two
+// the invariant keeps.
+func (d *Driver) deactivateRest(ctx context.Context, app string, keep []string) error {
+	pager := d.revisions.NewListRevisionsPager(d.file.Cloud.ResourceGroup, app, nil)
+
+	var problems []string
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("listing revisions of %s: %w", app, err)
+		}
+		for _, r := range page.Value {
+			if r == nil || r.Properties == nil || !derefBool(r.Properties.Active) {
+				continue
+			}
+			name := derefString(r.Name)
+			if name == "" || slices.Contains(keep, name) {
+				continue
+			}
+			if err := d.deactivate(ctx, app, name); err != nil {
+				problems = append(problems, err.Error())
+			}
+		}
+	}
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		return fmt.Errorf("%s", strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// Traffic reads the split as it is. Errors reading a revision are swallowed:
+// this is a diagnostic, and it is most useful in exactly the states where
+// something is already wrong.
+func (d *Driver) Traffic(ctx context.Context, t *config.Target) ([]target.TrafficEntry, error) {
+	app, err := d.getApp(ctx, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	cfg := app.Properties.Configuration
+	if cfg == nil || cfg.Ingress == nil {
+		return nil, fmt.Errorf("container app %s has no ingress", t.Name)
+	}
+
+	var out []target.TrafficEntry
+	for _, w := range cfg.Ingress.Traffic {
+		if w == nil {
+			continue
+		}
+		e := target.TrafficEntry{
+			Label:    derefString(w.Label),
+			Revision: derefString(w.RevisionName),
+			Weight:   int(derefInt32(w.Weight)),
+			Latest:   derefBool(w.LatestRevision),
+		}
+		if e.Revision != "" {
+			if tmpl, err := d.revisionTemplate(ctx, t.Name, e.Revision); err == nil {
+				name, err := target.PickContainer(
+					containerNames(tmpl.Containers), t.Container, appContainer)
+				if err == nil {
+					if c := findContainer(tmpl.Containers, name); c != nil {
+						e.Version = image.Tag(derefString(c.Image))
+					}
+				}
+			}
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
+	return out, nil
+}

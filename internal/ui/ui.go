@@ -31,9 +31,17 @@ func RenderPlan(w io.Writer, p *plan.Plan) {
 		fmt.Fprintf(w, "\n%s  %s\n", cp.Service.Name, cp.Service.Version)
 
 		for _, ch := range cp.Changes {
-			fmt.Fprintf(w, "  %-*s %s -> %s\n", width,
-				ch.Target.Label(),
-				orNone(ch.FromVersion), ch.ToVersion)
+			// A carried target is staged at the version it already runs, so
+			// "a8cb13c -> a8cb13c" would read as a mistake. What is worth saying
+			// is why it is in the release at all.
+			if ch.Carry {
+				fmt.Fprintf(w, "  %-*s %s, staged to complete the side\n", width,
+					ch.Target.Label(), ch.ToVersion)
+			} else {
+				fmt.Fprintf(w, "  %-*s %s -> %s\n", width,
+					ch.Target.Label(),
+					orNone(ch.FromVersion), ch.ToVersion)
+			}
 
 			// The reason is only worth a line when it says something the
 			// versions above do not. "version a -> b" next to "a -> b" is half
@@ -41,6 +49,7 @@ func RenderPlan(w io.Writer, p *plan.Plan) {
 			if r := ch.Reason; r != "" && r != versionReason(ch) {
 				fmt.Fprintf(w, "  %-*s %s\n", width, "", r)
 			}
+			renderRollout(w, width, cp, ch)
 			renderEnv(w, ch)
 		}
 
@@ -94,6 +103,37 @@ func renderEnv(w io.Writer, ch *target.Change) {
 	for _, name := range ch.EnvRemoved {
 		fmt.Fprintf(w, "      - %s\n", name)
 	}
+}
+
+// renderRollout says how this target is going out, and what it falls back to.
+//
+// Worth two lines because with a strategy in the config the shape of a release
+// is a choice rather than a given, and because "what do I roll back to" is the
+// question a blue-green deploy raises and nothing else answers.
+func renderRollout(w io.Writer, width int, cp *plan.ServicePlan, ch *target.Change) {
+	if ch.Sides == nil {
+		return
+	}
+
+	gate := "no smoke"
+	if n := len(cp.Service.Strategy.Smoke); n > 0 {
+		gate = fmt.Sprintf("smoke (%d)", n)
+	}
+	fmt.Fprintf(w, "  %-*s blue-green: stage %s, %s, switch\n", width, "",
+		ch.Sides.Idle.Label, gate)
+
+	// The environment diff above cannot show these — they differ by side by
+	// definition and are excluded from it — so without a line here the deploy
+	// would rewrite a downstream URL with nothing on screen saying so.
+	if names := cp.Service.Strategy.SideEnvNames(); len(names) > 0 {
+		fmt.Fprintf(w, "  %-*s %s environment: %s\n", width, "",
+			ch.Sides.Idle.Label, strings.Join(names, ", "))
+	}
+
+	// The previous version stays running behind the new one, and naming it is
+	// the difference between trusting that and hoping so.
+	fmt.Fprintf(w, "  %-*s rollback stays on %s %s\n", width, "",
+		ch.Sides.Active.Label, orNone(ch.FromVersion))
 }
 
 // Summary is the one-line result, for the end of a pipeline log.

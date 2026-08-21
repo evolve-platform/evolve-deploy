@@ -3,7 +3,6 @@
 coverage.txt
 .DS_Store
 
-# Design notes: internal, and full of things that do not belong in a public
-# repository — account ids, which services run where, and the audit of
-# credentials currently sitting in plaintext.
-DESIGN.md
+# The first spec: internal as it stands, because it names an AWS account id and
+# an artifact bucket. Scrub those and it can come out of here.
+specs/initial.md

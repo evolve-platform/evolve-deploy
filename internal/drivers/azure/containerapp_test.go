@@ -57,7 +57,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 	if got := derefString(proxy.Image); got != "reg.azurecr.io/proxy:v9" {
 		t.Errorf("the sidecar image was changed to %q", got)
 	}
-	if got := envFingerprint(proxy.Env)["OTEL_SERVICE_NAME"]; got != "=purchase" {
+	if got := envFingerprint(proxy.Env, nil)["OTEL_SERVICE_NAME"]; got != "=purchase" {
 		t.Errorf("the sidecar environment was changed: %q", got)
 	}
 }
@@ -70,7 +70,7 @@ func TestReferencesBecomeSecretRefs(t *testing.T) {
 		{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "ctp-client-secret"}},
 	})
 
-	fp := envFingerprint(got)
+	fp := envFingerprint(got, nil)
 	if fp["LOG_LEVEL"] != "=info" {
 		t.Errorf("LOG_LEVEL = %q", fp["LOG_LEVEL"])
 	}
@@ -128,7 +128,7 @@ func TestDiffContainersIgnoresSidecarsAndRotations(t *testing.T) {
 		container("reverse-proxy", "reg/proxy:v9", literal("SIDECAR_ONLY", "y")),
 	}
 
-	added, changed, removed := diffContainers(current, next, "main")
+	added, changed, removed := diffContainers(current, next, "main", nil)
 	if !reflect.DeepEqual(added, []string{"NEW"}) {
 		t.Errorf("added = %v", added)
 	}
@@ -172,7 +172,7 @@ func TestAnAbsentEnvConfigLeavesTheEnvironmentAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := envFingerprint(findContainer(next, "main").Env)
+	got := envFingerprint(findContainer(next, "main").Env, nil)
 	if len(got) != 2 {
 		t.Fatalf("environment = %v, want it carried over untouched", got)
 	}

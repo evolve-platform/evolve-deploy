@@ -136,3 +136,21 @@ func (w *prefixWriter) flush() {
 		w.buf = nil
 	}
 }
+
+// Validate renders every command without running any.
+//
+// It exists because of `after`. A hook naming a variable that does not exist is
+// an error either way — tmpl.Render runs with missingkey=error, so a hook can
+// never quietly become `--target tst-` — but that error would otherwise surface
+// while the hook runs, and an `after` hook runs on a release that has already
+// succeeded. A typo in a variable name must not turn a working deploy into a
+// red pipeline, so the rendering is checked during planning, where every other
+// findable failure is found.
+func Validate(commands []string, vars Vars) error {
+	for _, raw := range commands {
+		if _, err := tmpl.Render(raw, vars); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -53,7 +53,8 @@ func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	added, changed, removed := diffContainers(current, next, name)
+	// A job carries no traffic and so has no side of its own to write.
+	added, changed, removed := diffContainers(current, next, name, nil)
 	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
 		return nil, nil
 	}

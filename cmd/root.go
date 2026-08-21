@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -30,6 +31,7 @@ var (
 	flagEnv     string
 	flagDir     string
 	flagSet     []string
+	flagVar     []string
 	flagOnly    []string
 	flagWorkers int
 	flagVerbose bool
@@ -56,6 +58,8 @@ func init() {
 	p.StringVar(&flagDir, "dir", ".", "working directory for hooks")
 	p.StringSliceVar(&flagOnly, "only", nil, "limit to these services")
 	p.StringSliceVar(&flagSet, "set", nil, "override a version, as name=version (repeatable)")
+	p.StringSliceVar(&flagVar, "var", nil,
+		"pass a value to hooks as {{.name}}, as name=value (repeatable)")
 	p.IntVar(&flagWorkers, "workers", 16, "how many services to roll out at once")
 	p.BoolVarP(&flagVerbose, "verbose", "v", false,
 		"log every API call and every poll while waiting, to stderr")
@@ -113,6 +117,34 @@ func loadConfig(path string) (*config.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// hookVars reads --var name=value.
+//
+// It exists because a pipeline knows things a deploy config cannot: which
+// generation of a federated graph this release writes to, a build number, a
+// change ticket. Deliberately generic — naming the flag after the case that
+// forced it would have been the mistake, and the tool learns nothing about
+// whatever the value means.
+func hookVars(pairs []string) (map[string]string, error) {
+	// Shadowing one of these would mean a hook silently receiving a different
+	// version than the one being deployed, which is not worth being able to do.
+	reserved := []string{"version", "name", "env", "label", "previous_label", "url", "revision"}
+
+	out := map[string]string{}
+	for _, pair := range pairs {
+		name, value, ok := strings.Cut(pair, "=")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("--var %q is not name=value", pair)
+		}
+		if slices.Contains(reserved, name) {
+			return nil, fmt.Errorf(
+				"--var %s: that name is the tool's own (reserved: %s)",
+				name, strings.Join(reserved, ", "))
+		}
+		out[name] = value
+	}
+	return out, nil
 }
 
 // parseSet reads --set name=version. In CI this is how tst gets its versions:

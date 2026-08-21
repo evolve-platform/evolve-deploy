@@ -199,9 +199,23 @@ func renderEnv(env []target.EnvVar) []*armappcontainers.EnvironmentVar {
 // envFingerprint flattens an environment for comparison. A reference is
 // compared by what it points at, not by its value: the tool cannot see the
 // value and should not pretend a rotated secret is a change.
-func envFingerprint(env []*armappcontainers.EnvironmentVar) map[string]string {
+func envFingerprint(env []*armappcontainers.EnvironmentVar, ignore []string) map[string]string {
+	skip := map[string]bool{target.SideEnvVar: true}
+	for _, name := range ignore {
+		skip[name] = true
+	}
+
 	out := make(map[string]string, len(env))
 	for _, e := range env {
+		// The side is the tool's own and alternates every release, so the
+		// desired value never matches what the serving revision carries.
+		// Comparing it would report an environment change on every run, which
+		// would deploy on every run, which would flip the sides forever with no
+		// version ever changing. Anything the config sets per side is skipped
+		// for exactly that reason too.
+		if e != nil && skip[derefString(e.Name)] {
+			continue
+		}
 		switch {
 		case e == nil || e.Name == nil:
 		case e.SecretRef != nil:

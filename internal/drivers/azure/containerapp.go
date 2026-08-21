@@ -75,6 +75,10 @@ type appPayload struct {
 // its proxy_env_vars — is copied through untouched, because that image and its
 // settings belong to Terraform.
 func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Change, error) {
+	if want.Target.Strategy.IsBlueGreen() {
+		return d.planAppBlueGreen(ctx, want)
+	}
+
 	t := want.Target
 
 	timer := logging.Start("get container app", "name", t.Name)
@@ -109,7 +113,7 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	added, changed, removed := diffContainers(current, next, name)
+	added, changed, removed := diffContainers(current, next, name, nil)
 	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
 		return nil, nil
 	}
@@ -452,13 +456,20 @@ func nextContainers(
 	return next, from, nil
 }
 
-func diffContainers(current, next []*armappcontainers.Container, name string) (added, changed, removed []string) {
+// `ignore` is the variables the tool writes per side: their value differs by
+// side on purpose, so comparing the staged side's against the serving side's
+// would report a change on every run and deploy forever.
+func diffContainers(
+	current, next []*armappcontainers.Container,
+	name string,
+	ignore []string,
+) (added, changed, removed []string) {
 	var have, want map[string]string
 	if c := findContainer(current, name); c != nil {
-		have = envFingerprint(c.Env)
+		have = envFingerprint(c.Env, ignore)
 	}
 	if c := findContainer(next, name); c != nil {
-		want = envFingerprint(c.Env)
+		want = envFingerprint(c.Env, ignore)
 	}
 
 	for k, wv := range want {
@@ -505,4 +516,146 @@ func parseJSONMap(where, raw string) (map[string]string, error) {
 		return nil, fmt.Errorf("%s does not hold a JSON object of strings: %w", where, err)
 	}
 	return out, nil
+}
+
+// planAppBlueGreen works out the next revision of a Container App that is
+// deployed a side at a time.
+//
+// It differs from planApp in one place that matters more than it looks: the
+// template it reads, compares against and builds on is the one belonging to the
+// revision that is *serving*, not the app's own. With two live revisions the
+// app's template is whichever was created last — which after a failed deploy is
+// the revision that was abandoned. Reading that would make the retry after a
+// failed smoke test report "already up to date", and would carry the failed
+// attempt's environment into the next release.
+func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*target.Change, error) {
+	t := want.Target
+
+	app, err := d.getApp(ctx, t.Name)
+	if err != nil {
+		return nil, err
+	}
+	sides, err := d.sidesOf(ctx, t, app)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only fall back to the app's own template when no side is serving yet,
+	// which is an app that has never been deployed.
+	current := app.Properties.Template.Containers
+	if sides.Active.Revision != "" {
+		tmpl, err := d.revisionTemplate(ctx, t.Name, sides.Active.Revision)
+		if err != nil {
+			return nil, fmt.Errorf("container app %s: %w", t.Name, err)
+		}
+		current = tmpl.Containers
+	}
+
+	name, err := target.PickContainer(containerNames(current), t.Container, appContainer)
+	if err != nil {
+		return nil, fmt.Errorf("container app %s: %w", t.Name, err)
+	}
+	slog.Debug("container chosen", "app", t.Name, "container", name,
+		"of", strings.Join(containerNames(current), ","))
+
+	var declared []*armappcontainers.Secret
+	if app.Properties.Configuration != nil {
+		declared = app.Properties.Configuration.Secrets
+	}
+	if err := verifySecretRefs(want.Env, declared, "container app "+t.Name); err != nil {
+		return nil, err
+	}
+
+	next, from, err := nextContainers(current, name, want.Version, want.Env, want.ManageEnv)
+	if err != nil {
+		return nil, err
+	}
+	// The side goes in last, and after the diff is taken it is invisible — see
+	// envFingerprint. It alternates every release, so comparing it would report
+	// a change on every run and deploy forever. The variables the config sets
+	// per side are invisible for the same reason and go in the same write.
+	sideEnv := want.SideEnv[sides.Idle.Label]
+	if err := verifySecretRefs(sideEnv, declared, "container app "+t.Name); err != nil {
+		return nil, err
+	}
+	managed := t.Strategy.SideEnvNames()
+	next = withSide(next, name, sides.Idle.Label, sideEnv, managed)
+
+	added, changed, removed := diffContainers(current, next, name, managed)
+
+	// Nothing changed here, but the side still needs a revision of its own: the
+	// staged side is only a stack if every app is on it, and a revision can hold
+	// one label at a time so the serving one cannot lend it. Whether this is
+	// deployed is the release's call, not this target's — see Change.Carry.
+	carry := len(added)+len(changed)+len(removed) == 0 && from == want.Version
+
+	var fqdn string
+	if cfg := app.Properties.Configuration; cfg != nil && cfg.Ingress != nil {
+		fqdn = derefString(cfg.Ingress.Fqdn)
+	}
+
+	return &target.Change{
+		Service:     want.Service,
+		Target:      t,
+		FromVersion: from,
+		ToVersion:   want.Version,
+		Reason:      reason(from, want.Version),
+		EnvAdded:    added,
+		EnvChanged:  changed,
+		EnvRemoved:  removed,
+		Sides:       sides,
+		Carry:       carry,
+		Payload:     &bgPayload{containers: next, fqdn: fqdn},
+	}, nil
+}
+
+// withSide writes the side, and the side's own variables, into the application
+// container's environment.
+//
+// It works on whatever environment it is given, which is what makes it correct
+// in image-only mode too: there the environment was copied from the serving
+// revision untouched, and this writes a few variables over it rather than
+// replacing the lot.
+//
+// `managed` is every variable any side names, and it is dropped before the
+// staged side's values go in. That is why it is passed rather than derived from
+// `sideEnv`: the containers came from the *other* side's revision, so a variable
+// this side does not set would arrive carrying the other side's value. Config
+// validation keeps the two sets equal, so in practice this removes exactly what
+// it puts back — differently.
+func withSide(
+	containers []*armappcontainers.Container,
+	name, side string,
+	sideEnv []target.EnvVar,
+	managed []string,
+) []*armappcontainers.Container {
+	drop := map[string]bool{target.SideEnvVar: true}
+	for _, n := range managed {
+		drop[n] = true
+	}
+
+	out := make([]*armappcontainers.Container, 0, len(containers))
+	for _, c := range containers {
+		if c == nil || derefString(c.Name) != name {
+			out = append(out, c)
+			continue
+		}
+
+		env := make([]*armappcontainers.EnvironmentVar, 0, len(c.Env)+1+len(sideEnv))
+		for _, e := range c.Env {
+			if e == nil || drop[derefString(e.Name)] {
+				continue
+			}
+			env = append(env, e)
+		}
+
+		replaced := *c
+		replaced.Env = append(env, &armappcontainers.EnvironmentVar{
+			Name:  to.Ptr(target.SideEnvVar),
+			Value: to.Ptr(side),
+		})
+		replaced.Env = append(replaced.Env, renderEnv(sideEnv)...)
+		out = append(out, &replaced)
+	}
+	return out
 }

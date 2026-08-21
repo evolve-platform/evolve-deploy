@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/evolve-platform/evolve-deploy/internal/config"
 	"github.com/evolve-platform/evolve-deploy/internal/hooks"
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
@@ -38,6 +39,8 @@ type Options struct {
 	Concurrency int
 	// Width aligns progress lines with the plan printed above them.
 	Width int
+	// Vars are the --var values, available to every hook.
+	Vars map[string]string
 }
 
 // Apply executes a plan.
@@ -77,12 +80,42 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 			n, o.Concurrency)
 	}
 
-	// One record per service that has work, built before anything starts so
-	// that the map is only ever read from the goroutines below.
-	runs := make(map[string]*serviceRun, len(p.Services))
+	// One record per unit of work, built before anything starts so that the map
+	// is only ever read from the goroutines below.
+	//
+	// Every blue-green service is one unit, not one each: the side belongs to the
+	// environment, so the whole of it is staged, gated and switched together.
+	runs := make(map[string]*serviceRun, len(p.Services)+1)
+	var release []*ServicePlan
 	for _, cp := range p.Services {
-		if cp.HasWork() {
-			runs[cp.Service.Name] = &serviceRun{plan: cp, done: make(chan struct{})}
+		if !cp.HasWork() {
+			continue
+		}
+		if cp.BlueGreen() {
+			release = append(release, cp)
+			continue
+		}
+		runs[cp.Service.Name] = &serviceRun{
+			name: cp.Service.Name,
+			deps: cp.Service.DependsOn,
+			done: make(chan struct{}),
+			run:  func(ctx context.Context) error { return applyService(ctx, cp, o) },
+		}
+	}
+	if len(release) > 0 {
+		// Its dependencies are every dependency the staged services declare.
+		// They can only name a `direct` service — an edge between two blue-green
+		// services is refused while reading the config, because there is nothing
+		// left to order once the whole side goes at once.
+		var deps []string
+		for _, cp := range release {
+			deps = append(deps, cp.Service.DependsOn...)
+		}
+		runs[releaseNode] = &serviceRun{
+			name: releaseNode,
+			deps: deps,
+			done: make(chan struct{}),
+			run:  func(ctx context.Context) error { return applyRelease(ctx, release, o) },
 		}
 	}
 
@@ -98,7 +131,7 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 			if blocker := awaitDeps(ctx, r, runs); blocker != "" {
 				r.blocker = blocker
 				fmt.Fprintf(o.Out, "  %-*s skipped, %s did not deploy\n",
-					o.Width, r.plan.Service.Name, blocker)
+					o.Width, r.name, blocker)
 				return
 			}
 
@@ -114,7 +147,7 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 			}
 			defer func() { <-sem }()
 
-			r.err = applyService(ctx, r.plan, o)
+			r.err = r.run(ctx)
 		})
 	}
 	wg.Wait()
@@ -166,7 +199,12 @@ func countWork(p *Plan) int {
 // channel closes, so anything that has waited on done may read them without a
 // lock.
 type serviceRun struct {
-	plan *ServicePlan
+	// name is what failures are reported under: a service, or the whole staged
+	// release.
+	name string
+	// deps are the names this unit waits for, if they are part of this run.
+	deps []string
+	run  func(context.Context) error
 	done chan struct{}
 
 	// err is a real failure: the service ran and something went wrong.
@@ -185,7 +223,7 @@ type serviceRun struct {
 // there — and demanding it be present would fail every release that touched
 // one service.
 func awaitDeps(ctx context.Context, r *serviceRun, runs map[string]*serviceRun) string {
-	for _, name := range r.plan.Service.DependsOn {
+	for _, name := range r.deps {
 		dep, ok := runs[name]
 		if !ok {
 			continue
@@ -232,7 +270,7 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if err := o.Hooks.Run(ctx, cp.Service.Name, "before", cp.Service.Before, hookVars(cp)); err != nil {
+			if err := o.Hooks.Run(ctx, cp.Service.Name, "before", cp.Service.Before, cp.HookVars()); err != nil {
 				mu.Lock()
 				failed = append(failed, fmt.Sprintf("%s: %v", cp.Service.Name, err))
 				mu.Unlock()
@@ -261,15 +299,6 @@ func hookWidth(p *Plan) int {
 		width = max(width, len(cp.Service.Name)+2)
 	}
 	return width
-}
-
-// hookVars are the substitutions a hook is given, for either phase.
-func hookVars(cp *ServicePlan) hooks.Vars {
-	return hooks.Vars{
-		"version": cp.Service.Version,
-		"name":    cp.Service.Name,
-		"env":     cp.Env,
-	}
 }
 
 func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
@@ -320,7 +349,7 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 	// after only runs on success, and a failure here does not roll anything
 	// back: the deploy worked, and removing a working version because a
 	// registration call failed is worse than the missing registration.
-	if err := o.Hooks.Run(ctx, c.Name, "after", c.After, hookVars(cp)); err != nil {
+	if err := o.Hooks.Run(ctx, c.Name, "after", c.After, cp.HookVars()); err != nil {
 		return err
 	}
 	return nil
@@ -364,4 +393,294 @@ func orNone(s string) string {
 		return "(none)"
 	}
 	return s
+}
+
+// applyBlueGreen releases one service a side at a time.
+//
+// The shape is the point: everything before the switch is reversible without a
+// user noticing, so a release that fails its gate is a non-event rather than an
+// outage. Staging is where the time goes, the smoke test is the gate, and the
+// switch is one write.
+// releaseNode is the name the staged release is reported under. Not a service
+// name, and it cannot collide with one: the config reserves it.
+const releaseNode = config.ReleaseName
+
+// bgTarget is one staged target and the service it belongs to.
+//
+// The phases run over the whole release while hooks and smoke commands stay a
+// property of a service, so both have to travel together.
+type bgTarget struct {
+	ch *target.Change
+	cp *ServicePlan
+}
+
+func changes(items []bgTarget) []*target.Change {
+	out := make([]*target.Change, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.ch)
+	}
+	return out
+}
+
+// applyRelease stages every blue-green service, gates the lot, and switches it
+// in one go.
+//
+// The phases are release-wide, not per service, and that is the whole design:
+// the side belongs to the environment, so a half-staged side is not a stack and
+// testing one app of it proves nothing about the release. Stage everything,
+// check it, then move the traffic — and if any part of it fails, none of it ever
+// served.
+//
+// It follows that a service with nothing to change is staged too. Its revision
+// carries the same image as the one already serving; what it gives the release is
+// a side that is complete, which is what the smoke commands are pointed at.
+func applyRelease(ctx context.Context, plans []*ServicePlan, o Options) error {
+	rollout, ok := o.Driver.(target.Rollout)
+	if !ok {
+		// Refused during planning; here it would mean the plan and the apply
+		// disagree about the driver, which is a bug rather than a config error.
+		return fmt.Errorf("%s cannot move traffic", o.Driver.Name())
+	}
+
+	// Riders are the targets with no ingress — a container app job, a lambda
+	// beside a service. They share an image with the thing being released, so
+	// they move with the traffic and not before it: writing them early points
+	// the 03:00 cron at code the API is not serving yet.
+	var routable, riders []bgTarget
+	for _, cp := range plans {
+		for _, ch := range cp.Changes {
+			if ch.Sides != nil {
+				routable = append(routable, bgTarget{ch, cp})
+			} else {
+				riders = append(riders, bgTarget{ch, cp})
+			}
+		}
+	}
+
+	staged, errs := stageAll(ctx, rollout, routable, o)
+	if len(errs) == 0 {
+		errs = smokeAll(ctx, routable, staged, o)
+	}
+	if len(errs) > 0 {
+		// Nothing has served from any of this, so putting it back is free.
+		errs = append(errs, abandonAll(ctx, rollout, changes(routable), o)...)
+		sort.Strings(errs)
+		return fmt.Errorf("\n      %s", strings.Join(errs, "\n      "))
+	}
+
+	if errs := switchAll(ctx, rollout, routable, riders, o); len(errs) > 0 {
+		errs = append(errs, abandonAll(ctx, rollout, changes(routable), o)...)
+		errs = append(errs, revert(ctx, changes(riders), o)...)
+		sort.Strings(errs)
+		return fmt.Errorf("\n      %s", strings.Join(errs, "\n      "))
+	}
+
+	// A failure from here is a warning: the traffic is on the new version and
+	// the deploy worked. Removing a working version over a cleanup call that
+	// returned 500 is worse than the leftover it would tidy.
+	for _, it := range routable {
+		if err := rollout.Settle(ctx, it.ch); err != nil {
+			fmt.Fprintf(o.Out, "  %-*s deployed, but the cleanup failed: %v\n",
+				o.Width, it.ch.Target.Label(), err)
+			fmt.Fprintf(o.Out, "  %-*s (an old revision is still running and still costs money; "+
+				"the next release tidies it)\n", o.Width, "")
+		}
+	}
+
+	for _, it := range routable {
+		// After a blue-green deploy the question is not only whether it worked
+		// but what it falls back to, and this is the only place that knows.
+		fmt.Fprintf(o.Out, "  %-*s %s serves %s, %s keeps %s\n", o.Width,
+			it.ch.Target.Label(), it.ch.Sides.Idle.Label, it.ch.ToVersion,
+			it.ch.Sides.Active.Label, orNone(it.ch.FromVersion))
+	}
+
+	// The after hooks are still per service and still run only once its own
+	// targets are all serving — which, now that the switch is one phase, is the
+	// same moment for everything. A failure here fails the release without
+	// rolling anything back, as it always has.
+	var failed []string
+	for _, cp := range plans {
+		c := cp.Service
+		if len(c.After) == 0 {
+			continue
+		}
+		if err := o.Hooks.Run(ctx, c.Name, "after", c.After, cp.HookVars()); err != nil {
+			failed = append(failed, fmt.Sprintf("%s: %v", c.Name, err))
+		}
+	}
+	if len(failed) > 0 {
+		sort.Strings(failed)
+		return fmt.Errorf("\n      %s", strings.Join(failed, "\n      "))
+	}
+	return nil
+}
+
+// stageAll creates every new revision at once. They carry no traffic, so there
+// is nothing to serialise and staging is the slow part of the release.
+func stageAll(
+	ctx context.Context,
+	r target.Rollout,
+	items []bgTarget,
+	o Options,
+) (map[*target.Change]*target.Staged, []string) {
+	var (
+		mu     sync.Mutex
+		staged = map[*target.Change]*target.Staged{}
+		errs   []string
+		wg     sync.WaitGroup
+	)
+
+	for _, it := range items {
+		ch := it.ch
+		wg.Go(func() {
+			started := time.Now()
+			got, err := r.Stage(ctx, ch)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("%s: staging %s: %v",
+					ch.Target.Label(), it.cp.Side, err))
+				fmt.Fprintf(o.Out, "  %-*s failed to stage after %s\n",
+					o.Width, ch.Target.Label(), time.Since(started).Round(time.Second))
+				return
+			}
+			staged[ch] = got
+			fmt.Fprintf(o.Out, "  %-*s staged %s in %s\n", o.Width,
+				ch.Target.Label(), got.Label, time.Since(started).Round(time.Second))
+		})
+	}
+	wg.Wait()
+
+	sort.Strings(errs)
+	return staged, errs
+}
+
+// smokeAll runs the gate against every staged side.
+//
+// Per target rather than per service, unlike before and after: those publish
+// one schema for a service with four jobs, while a smoke test talks to a URL
+// and a URL belongs to one app.
+func smokeAll(
+	ctx context.Context,
+	items []bgTarget,
+	staged map[*target.Change]*target.Staged,
+	o Options,
+) []string {
+	var (
+		mu   sync.Mutex
+		errs []string
+		wg   sync.WaitGroup
+	)
+
+	for _, it := range items {
+		ch, cp := it.ch, it.cp
+		commands := cp.SmokeCommands()
+		if len(commands) == 0 {
+			continue
+		}
+		got, ok := staged[ch]
+		if !ok {
+			continue
+		}
+
+		wg.Go(func() {
+			started := time.Now()
+
+			vars := cp.HookVars()
+			vars["url"] = got.URL
+			vars["label"] = got.Label
+			vars["revision"] = got.Revision
+
+			if err := o.Hooks.Run(ctx, cp.Service.Name, "smoke", commands, vars); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("%s: %v", ch.Target.Label(), err))
+				mu.Unlock()
+				fmt.Fprintf(o.Out, "  %-*s smoke failed after %s, no traffic was moved\n",
+					o.Width, ch.Target.Label(), time.Since(started).Round(time.Second))
+				return
+			}
+			fmt.Fprintf(o.Out, "  %-*s smoke passed in %s\n", o.Width,
+				ch.Target.Label(), time.Since(started).Round(time.Second))
+		})
+	}
+	wg.Wait()
+
+	sort.Strings(errs)
+	return errs
+}
+
+// switchAll moves the traffic and writes the riders in the same step.
+//
+// The riders go with it rather than before it: a job shares its image with the
+// service beside it, and updating it while the old version still serves is the
+// mixed state this whole mechanism exists to avoid.
+func switchAll(
+	ctx context.Context,
+	r target.Rollout,
+	routable, riders []bgTarget,
+	o Options,
+) []string {
+	var (
+		mu   sync.Mutex
+		errs []string
+		wg   sync.WaitGroup
+	)
+	fail := func(format string, args ...any) {
+		mu.Lock()
+		errs = append(errs, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+
+	for _, it := range routable {
+		ch := it.ch
+		wg.Go(func() {
+			if err := r.Switch(ctx, ch); err != nil {
+				fail("%s: switching to %s: %v", ch.Target.Label(), ch.Sides.Idle.Label, err)
+			}
+		})
+	}
+	for _, it := range riders {
+		ch := it.ch
+		wg.Go(func() {
+			if err := o.Driver.Apply(ctx, ch); err != nil {
+				fail("%s: %v", ch.Target.Label(), err)
+			}
+		})
+	}
+	wg.Wait()
+
+	sort.Strings(errs)
+	return errs
+}
+
+// abandonAll puts the traffic back and switches off the revisions that never
+// served anything.
+func abandonAll(
+	ctx context.Context,
+	r target.Rollout,
+	changes []*target.Change,
+	o Options,
+) []string {
+	var (
+		mu   sync.Mutex
+		errs []string
+		wg   sync.WaitGroup
+	)
+
+	for _, ch := range changes {
+		wg.Go(func() {
+			if err := r.Abandon(ctx, ch); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("%s: could not put the traffic back: %v",
+					ch.Target.Label(), err))
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+
+	sort.Strings(errs)
+	return errs
 }

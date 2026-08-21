@@ -52,6 +52,12 @@ type Desired struct {
 	// Terraform put there — which is the opposite of what a config that
 	// mentions no variables is asking for.
 	ManageEnv bool
+
+	// SideEnv is the resolved per-side environment, keyed by label. Written on
+	// the staged side regardless of ManageEnv: these variables are how a side
+	// addresses its own downstream, so they are added to the environment rather
+	// than replacing it.
+	SideEnv map[string][]EnvVar
 }
 
 // Change is a planned modification. Reason is shown to the user: a deploy that
@@ -68,6 +74,24 @@ type Change struct {
 	EnvAdded   []string
 	EnvChanged []string
 	EnvRemoved []string
+
+	// Sides is set for a blue-green target: which label this change is going to
+	// and which one it is coming from. Nil for a direct change, and nil for a
+	// target that rides along without carrying traffic.
+	Sides *Sides
+
+	// Carry marks a target that is staged only to keep the side complete:
+	// nothing about it changed, and it is here because the side is a property of
+	// the environment rather than of one service. A side missing an app is not a
+	// stack, so it cannot be smoke-tested as one — and the label has to point at
+	// something, since a revision can carry only one label and the serving one
+	// already has the other.
+	//
+	// Whether these are deployed at all is decided for the release, not per
+	// service: if nothing in the release has a real change, every carry is
+	// dropped and the run does nothing. That is what keeps a second `apply` a
+	// no-op.
+	Carry bool
 
 	// Payload is driver-private state carried from Plan to Apply, so Apply does
 	// not have to read the world a second time and risk acting on state that
@@ -120,4 +144,130 @@ func (e *ErrNotImplemented) Error() string {
 		return fmt.Sprintf("%s: target type %q is not implemented yet", e.Cloud, e.Type)
 	}
 	return fmt.Sprintf("%s is not implemented yet", e.Cloud)
+}
+
+// SideEnvVar carries which side a revision is, into the revision itself.
+//
+// A service behind a router cannot be reached by tagging a request: a header
+// only arrives if the router, the reverse proxy and every sidecar in the path
+// forward it, and one that drops it produces a smoke test that quietly checks
+// the old version and passes. The side is a property of the deployment, not of
+// the request, so it belongs in the environment — where a service can resolve
+// its own downstream by it, with nothing to propagate.
+//
+// It is written on every blue-green target and is not optional. Opt-in would
+// mean a service that needs it can forget to declare it, and the failure mode
+// of that is silent.
+const SideEnvVar = config.SideEnvVar
+
+// Side is one of the two labels and what it currently points at.
+type Side struct {
+	// Label is the name in the traffic block: blue or green, unless the config
+	// says otherwise.
+	Label string
+	// Revision is what the label points at, empty when the label does not
+	// exist yet. The idle side of an app that has only ever been deployed once
+	// is exactly that.
+	Revision string
+	// Version is the image tag on that revision, empty when there is none to
+	// read.
+	Version string
+}
+
+// Sides is the answer to "which one is active", read from the platform.
+//
+// There is no state and no marker: active is the label carrying 100% of the
+// traffic. A split means someone is in here by hand or a previous run died, and
+// there is then no active side to deploy away from — so reading this fails
+// rather than guessing which of the two may be thrown away.
+type Sides struct {
+	// Active carries 100% of the traffic. Its Revision is where FromVersion and
+	// the environment diff are read from — not the resource's own template,
+	// which with two live revisions is the last one created and after a failed
+	// deploy is the one that was thrown away.
+	Active Side
+	// Idle is the other label: where this release is going.
+	Idle Side
+
+	// PinNeeded is set when Active is expressed as "whatever is newest"
+	// (latestRevision on Azure, LATEST on Cloud Run) rather than as a revision
+	// name.
+	//
+	// That is a rule, not a reference, and it has to be turned into a fact
+	// before anything is staged: while it stands, every new revision takes 100%
+	// of the traffic the moment it exists — before the smoke test and before a
+	// single weight is written.
+	PinNeeded bool
+}
+
+// Staged is where a newly created revision can be reached, before it serves
+// anything.
+type Staged struct {
+	Label    string
+	Revision string
+	// URL is the label's own address. It is what makes a smoke test possible at
+	// all: a revision with no traffic is still reachable there.
+	URL string
+}
+
+// Rollout is implemented by drivers that can route traffic by label.
+//
+// The choreography lives in package plan and is the same on every platform that
+// has labels and weights; only the writes differ. A target type that cannot
+// route is a plan-time error when the config asks for blue-green, never a
+// silent direct update.
+type Rollout interface {
+	// Routable reports whether this target type carries traffic at all. A
+	// container app job has no ingress: it rides along with the service it
+	// shares an image with and is written at the switch.
+	Routable(t config.TargetType) bool
+
+	// Sides reads the current split. It fails when no single label has 100%.
+	Sides(ctx context.Context, t *config.Target) (*Sides, error)
+
+	// Stage creates the new revision, waits until it is ready, points the idle
+	// label at it, and returns where it can be reached. Nothing serves from it
+	// yet.
+	Stage(ctx context.Context, ch *Change) (*Staged, error)
+
+	// Switch hands the staged side 100% of the traffic, in one write.
+	Switch(ctx context.Context, ch *Change) error
+
+	// Abandon puts the traffic back where it was and deactivates the staged
+	// revision. Called when staging or the smoke test fails, and the point of
+	// the whole exercise: nothing that anyone saw has happened yet.
+	Abandon(ctx context.Context, ch *Change) error
+
+	// Settle restates the invariant — two labelled revisions, everything else
+	// deactivated — and is rewritten on every successful deploy even when it
+	// already held, so a run that died halfway is tidied by the next release.
+	//
+	// A failure here is a warning, not a failed deploy: the traffic is on the
+	// new version and removing a working version over a cleanup call is worse
+	// than the leftover.
+	Settle(ctx context.Context, ch *Change) error
+
+	// Point puts 100% of the traffic on one label without staging anything. It
+	// is the manual rollback, and the way out of a split someone made by hand.
+	Point(ctx context.Context, t *config.Target, label string) error
+
+	// Traffic reads the split as it is, without judging it.
+	//
+	// Separate from Sides on purpose: Sides refuses to interpret a split, and
+	// "show me what is going on" has to work precisely when something is
+	// wrong.
+	Traffic(ctx context.Context, t *config.Target) ([]TrafficEntry, error)
+}
+
+// TrafficEntry is one row of a target's traffic split.
+type TrafficEntry struct {
+	Label    string
+	Revision string
+	// Version is the image tag on that revision, empty when it could not be
+	// read. A diagnostic is more useful with it and must not fail without it.
+	Version string
+	Weight  int
+	// Latest marks an entry that says "whatever is newest" rather than naming a
+	// revision.
+	Latest bool
 }

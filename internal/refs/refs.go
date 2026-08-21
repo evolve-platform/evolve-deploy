@@ -5,7 +5,7 @@
 // pull request, and references to a store. Whether a reference is handed to the
 // platform untouched or read by the tool is a property of the target, not a
 // choice in the config: ECS resolves valueFrom itself, Lambda cannot, so on
-// Lambda the tool reads it. See DESIGN.md.
+// Lambda the tool reads it. See specs/initial.md.
 package refs
 
 import (

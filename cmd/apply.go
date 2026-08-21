@@ -35,7 +35,12 @@ release deployed.`,
 			return err
 		}
 
-		p, err := plan.Build(ctx, f, driver)
+		vars, err := hookVars(flagVar)
+		if err != nil {
+			return err
+		}
+
+		p, err := plan.Build(ctx, f, driver, vars)
 		if err != nil {
 			return err
 		}
@@ -66,6 +71,7 @@ release deployed.`,
 			Out:         out,
 			Concurrency: flagWorkers,
 			Width:       ui.Width(p),
+			Vars:        vars,
 		})
 	},
 }

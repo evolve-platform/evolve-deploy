@@ -1,0 +1,59 @@
+# evolve-reference-b2b, production.
+#
+# Same file as tst, with one addition: production releases a side at a time.
+# Terraform sets revision_mode = "Multiple" and bootstraps the traffic block,
+# then lets go of it — see specs/blue-green.md for the one extra ignore_changes.
+cloud:
+  provider: azure
+  subscription: 00000000-0000-0000-0000-000000000000
+  resource_group: evolve-prd
+  # Only needed because a ${param:…} reference is used below.
+  app_config: https://evolve-prd.azconfig.io
+
+# The default shape of a release for every service below.
+strategy:
+  type: blue-green
+  smoke:
+    # {{.url}} is the staged side's own address. Retries belong in the command:
+    # the revision has just become ready, so the first call may well 503.
+    - curl -fsS --retry 5 --retry-delay 2 {{.url}}/healthz
+    - npm run smoke -- --base-url {{.url}}
+
+services:
+  purchase:
+    version: 27ec167
+    type: container-app
+    env:
+      LOG_LEVEL: info
+      CTP_CLIENT_SECRET: ${secret:ctp-client-secret}
+    # Checked against what is serving now, published to where this release goes.
+    before:
+      - hive schema:check --service purchase --target {{.env}}
+    after:
+      - hive schema:publish --service purchase --target {{.env}}
+
+  # One image, five deployables. The jobs carry no traffic, so they ride along:
+  # their templates are written at the switch, never before it.
+  discover:
+    version: 27ec167
+    envFrom:
+      - ${param:/evolve/${env}/discover/setup}
+    targets:
+      - { type: container-app,     name: evolve-prd-discover }
+      - { type: container-app-job, name: evolve-prd-discover-products }
+      - { type: container-app-job, name: evolve-prd-discover-categories }
+
+  # No gate for a static site: it stages and switches straight away, and still
+  # gets a warm previous version to fall back to.
+  site:
+    version: def5678
+    type: container-app
+    strategy:
+      smoke: []
+
+  # And this one is updated straight, the way everything is by default.
+  catalog-commercetools:
+    version: 27ec167
+    type: container-app
+    strategy:
+      type: direct
