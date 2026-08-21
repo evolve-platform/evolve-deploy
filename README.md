@@ -333,7 +333,7 @@ traffic, runs a command against it, and switches in one write:
 strategy:
   type: blue-green
   smoke:
-    - curl -fsS --retry 5 --retry-delay 2 {{.url}}/healthz
+    - curl -fsS --retry 5 --retry-delay 2 {{url "site"}}/healthz
 
 services:
   site:
@@ -478,8 +478,13 @@ the same thing in `before` and in `after`:
 | `{{.label}}` | the side this release is going to |
 | `{{.previous_label}}` | the other one: what was serving, and what a rollback returns to |
 
-`smoke` additionally gets `{{.url}}` — the staged side's own address, which is
-what makes testing it possible at all — and `{{.revision}}`. On a `direct`
+`smoke` is different: it gates the release rather than a service, so it runs
+once and has no single service to take a URL from. It names one instead —
+`{{url "site"}}`, and `{{label "site"}}` / `{{revision "site"}}` — as a function
+rather than a field, because a template field has to be an identifier and
+`{{.catalog-commercetools.url}}` does not even parse. A name that stages nothing
+in this release fails the plan rather than resolving to an empty string: a gate
+pointed at nothing would pass. On a `direct`
 service the side variables are absent rather than empty, so a hook naming one
 fails loudly instead of publishing to `tst-`. Every hook line is rendered while
 planning, so a typo in a variable name cannot fail a release that already

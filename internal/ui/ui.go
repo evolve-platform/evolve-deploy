@@ -15,6 +15,43 @@ import (
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
 
+// renderGate says what stands between staging and the traffic moving.
+//
+// Once, at the end, because that is what it is. Printed against each target it
+// read as though every app ran the whole suite — four targets and three commands
+// looking like twelve runs — which is exactly the misreading that moving the
+// gate up a level was meant to end.
+func renderGate(w io.Writer, p *plan.Plan) {
+	if !p.Staging() {
+		return
+	}
+
+	side, previous := p.Side()
+	commands := p.SmokeCommands()
+	if len(commands) == 0 {
+		fmt.Fprintf(w, "The whole of %s is staged, then switched. No smoke commands, "+
+			"so nothing is checked in between.\n", side)
+		return
+	}
+
+	fmt.Fprintf(w, "Once all of %s is staged, %s before any traffic moves:\n",
+		side, pluralise(len(commands), "smoke command"))
+	for _, line := range commands {
+		fmt.Fprintf(w, "  %s\n", oneLine(line))
+	}
+	fmt.Fprintf(w, "A failure there switches nothing: %s keeps serving.\n", previous)
+}
+
+// oneLine unfolds a YAML block scalar so a command that was written over three
+// lines of curl flags prints as the one thing it is.
+//
+// Not truncated: the plan already prints before and after hooks in full, and the
+// interesting part of a smoke command — the path it asks for — is at the end,
+// which is exactly what a width limit would cut off.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // RenderPlan writes a human-readable plan.
 func RenderPlan(w io.Writer, p *plan.Plan) {
 	if p.Empty() {
@@ -68,6 +105,9 @@ func RenderPlan(w io.Writer, p *plan.Plan) {
 				len(cp.Service.Before), len(cp.Service.After))
 		}
 	}
+
+	fmt.Fprintln(w)
+	renderGate(w, p)
 	fmt.Fprintln(w)
 }
 
@@ -115,12 +155,8 @@ func renderRollout(w io.Writer, width int, cp *plan.ServicePlan, ch *target.Chan
 		return
 	}
 
-	gate := "no smoke"
-	if n := len(cp.Service.Strategy.Smoke); n > 0 {
-		gate = fmt.Sprintf("smoke (%d)", n)
-	}
-	fmt.Fprintf(w, "  %-*s blue-green: stage %s, %s, switch\n", width, "",
-		ch.Sides.Idle.Label, gate)
+	fmt.Fprintf(w, "  %-*s blue-green: stage %s, then switch\n", width, "",
+		ch.Sides.Idle.Label)
 
 	// The environment diff above cannot show these — they differ by side by
 	// definition and are excluded from it — so without a line here the deploy

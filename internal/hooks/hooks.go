@@ -13,6 +13,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"text/template"
 
 	"github.com/evolve-platform/evolve-deploy/internal/tmpl"
 )
@@ -43,6 +44,25 @@ type Vars map[string]string
 // Run executes the commands of one service in order and stops at the first
 // failure. Everything they print is tagged with the service name.
 func (r *Runner) Run(ctx context.Context, service, phase string, commands []string, vars Vars) error {
+	data := make(map[string]any, len(vars))
+	for k, v := range vars {
+		data[k] = v
+	}
+	return r.RunWith(ctx, service, phase, commands, data, nil)
+}
+
+// RunWith is Run for commands whose variables are not flat strings.
+//
+// The release-wide smoke test needs it: there is no single URL to give a test
+// that covers a whole deploy, so it names services instead — {{.site.url}}, or
+// the url function where the name has a hyphen in it.
+func (r *Runner) RunWith(
+	ctx context.Context,
+	service, phase string,
+	commands []string,
+	data any,
+	funcs template.FuncMap,
+) error {
 	if len(commands) == 0 {
 		return nil
 	}
@@ -56,7 +76,7 @@ func (r *Runner) Run(ctx context.Context, service, phase string, commands []stri
 	}
 
 	for _, raw := range commands {
-		line, err := tmpl.Render(raw, vars)
+		line, err := tmpl.RenderWith(raw, data, funcs)
 		if err != nil {
 			return fmt.Errorf("%s hook: %w", phase, err)
 		}
@@ -147,8 +167,17 @@ func (w *prefixWriter) flush() {
 // red pipeline, so the rendering is checked during planning, where every other
 // findable failure is found.
 func Validate(commands []string, vars Vars) error {
+	data := make(map[string]any, len(vars))
+	for k, v := range vars {
+		data[k] = v
+	}
+	return ValidateWith(commands, data, nil)
+}
+
+// ValidateWith is Validate for the nested data a release-wide smoke test uses.
+func ValidateWith(commands []string, data any, funcs template.FuncMap) error {
 	for _, raw := range commands {
-		if _, err := tmpl.Render(raw, vars); err != nil {
+		if _, err := tmpl.RenderWith(raw, data, funcs); err != nil {
 			return err
 		}
 	}

@@ -76,12 +76,17 @@ var DefaultLabels = []string{"blue", "green"}
 type Strategy struct {
 	Type StrategyType `yaml:"type"`
 
-	// Smoke runs against the staged side while it still carries no traffic. A
-	// non-zero exit aborts that service's release and nothing is switched.
+	// Smoke gates the whole release and is valid at file level only.
 	//
-	// An empty list is not the same as an absent one: `smoke: []` on a service
-	// says "no smoke test here", and that has to be sayable without restating
-	// the rest of the file's block.
+	// It covers a deploy, not a service. Running the same suite once per
+	// service would run it fourteen times for one release, and the test worth
+	// running is usually a request through a router that touches several
+	// services at once — which belongs to none of them. So there is one set of
+	// commands, run once, after everything has staged and before anything
+	// switches.
+	//
+	// A check of one revision on its own has not been lost: it is a line in
+	// that same set, addressed by name — `curl -fsS {{url "purchase"}}/healthz`.
 	Smoke []string `yaml:"smoke"`
 
 	// Labels are the two side names. They do nothing functionally — the tool
@@ -152,9 +157,6 @@ func (s *Strategy) merge(over *Strategy) *Strategy {
 	if over != nil {
 		if over.Type != "" {
 			out.Type = over.Type
-		}
-		if over.Smoke != nil {
-			out.Smoke = over.Smoke
 		}
 		if over.Labels != nil {
 			out.Labels = over.Labels
@@ -483,7 +485,7 @@ func (f *File) validate() error {
 		add("%s", msg)
 	}
 
-	for _, msg := range validateStrategy("strategy", f.Strategy) {
+	for _, msg := range validateStrategy("strategy", f.Strategy, true) {
 		add("%s", msg)
 	}
 
@@ -514,7 +516,7 @@ func (f *File) validate() error {
 		}
 
 		for _, msg := range validateStrategy(
-			fmt.Sprintf("services.%s.strategy", name), c.strategyRaw) {
+			fmt.Sprintf("services.%s.strategy", name), c.strategyRaw, false) {
 			add("%s", msg)
 		}
 
@@ -600,12 +602,20 @@ func (f *File) validate() error {
 // result: a bad value at file level would otherwise be reported once per
 // service, and a block that contradicts itself is only visible before the merge
 // flattens it.
-func validateStrategy(where string, s *Strategy) []string {
+func validateStrategy(where string, s *Strategy, fileLevel bool) []string {
 	if s == nil {
 		return nil
 	}
 
 	var msgs []string
+
+	// The gate covers a release, so there is nowhere for a per-service one to
+	// go. Rejecting it rather than merging it keeps `smoke` meaning one thing.
+	if !fileLevel && s.Smoke != nil {
+		msgs = append(msgs, fmt.Sprintf(
+			"%s.smoke: gates the whole release, so it belongs in the file's "+
+				"`strategy` block rather than on one service", where))
+	}
 	switch s.Type {
 	case "", StrategyDirect, StrategyBlueGreen:
 	default:
