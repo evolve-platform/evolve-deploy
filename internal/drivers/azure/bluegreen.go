@@ -2,11 +2,15 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appcontainers/armappcontainers/v3"
@@ -298,21 +302,37 @@ func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, 
 		}
 	}
 
-	if err := d.patchApp(ctx, name, p.containers, readyTimeout); err != nil {
+	if err := d.patchTemplate(ctx, name, p.containers); err != nil {
 		return nil, err
 	}
 
-	// The revision that just became ready is the one to label. Read back rather
-	// than derived: the suffix is the platform's to choose.
+	// LatestRevisionName, not LatestReadyRevisionName.
+	//
+	// The latter is sticky: it names the newest revision that became ready at
+	// some point, and keeps naming it after that revision has been deactivated.
+	// A retry of a release whose gate failed patches the same template, which
+	// Container Apps answers with the revision it already has — so latest and
+	// latest-ready are both that dead revision, waitReady's comparison is true
+	// on the first poll, and the label lands on something with no replicas. Which
+	// is a smoke test timing out against a URL that resolves.
 	app, err := d.getApp(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	staged := derefString(app.Properties.LatestReadyRevisionName)
+	staged := derefString(app.Properties.LatestRevisionName)
 	if staged == "" {
-		return nil, fmt.Errorf("container app %s reported no ready revision after staging", name)
+		return nil, fmt.Errorf("container app %s reported no revision after staging", name)
 	}
 	p.staged = staged
+
+	// An identical template creates no new revision, so this may be one an
+	// earlier abandoned release switched off. Nothing else will turn it back on.
+	if err := d.activateIfStopped(ctx, name, staged); err != nil {
+		return nil, err
+	}
+	if err := d.waitRunning(ctx, name, staged, readyTimeout); err != nil {
+		return nil, err
+	}
 
 	if err := d.patchTraffic(ctx, name, weights(
 		trafficEntry{ch.Sides.Active, weightAll},
@@ -352,7 +372,13 @@ func (d *Driver) Abandon(ctx context.Context, ch *target.Change) error {
 		trafficEntry{ch.Sides.Active, weightAll},
 		trafficEntry{ch.Sides.Idle, weightNone},
 	))
-	if p.staged != "" {
+
+	// Only switch off a revision this release actually brought up. When an
+	// identical template made Container Apps hand back the revision the idle
+	// label already pointed at, deactivating it undoes something the release
+	// never did — and leaves the label naming a revision with no replicas, which
+	// is a URL that resolves and answers nothing.
+	if p.staged != "" && p.staged != ch.Sides.Idle.Revision {
 		// Deactivated even when the traffic write failed: the revision is
 		// unwanted either way, and leaving it running costs money for nothing.
 		if dErr := d.deactivate(ctx, ch.Target.Name, p.staged); dErr != nil && err == nil {
@@ -444,6 +470,36 @@ func pointTraffic(
 	return out, nil
 }
 
+// patchTemplate writes the template and returns once ARM has accepted it.
+//
+// It does not wait for readiness the way the direct path does, because waiting
+// belongs to a named revision here: staging has to know exactly which revision
+// it is about to hand a label, and the app's own latest-ready pointer cannot
+// tell it that. See waitRunning.
+func (d *Driver) patchTemplate(
+	ctx context.Context,
+	name string,
+	containers []*armappcontainers.Container,
+) error {
+	timer := logging.Start("patch container app template", "name", name,
+		"containers", len(containers))
+
+	poller, err := d.apps.BeginUpdate(ctx, d.file.Cloud.ResourceGroup, name,
+		armappcontainers.ContainerApp{
+			Properties: &armappcontainers.ContainerAppProperties{
+				Template: &armappcontainers.Template{Containers: containers},
+			},
+		}, nil)
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	timer.Done()
+	return nil
+}
+
 // patchTraffic writes only the traffic block.
 //
 // A merge patch for the same reason the template write is one: a read never
@@ -480,10 +536,120 @@ func (d *Driver) deactivate(ctx context.Context, app, revision string) error {
 	timer := logging.Start("deactivate revision", "app", app, "revision", revision)
 	if _, err := d.revisions.DeactivateRevision(
 		ctx, d.file.Cloud.ResourceGroup, app, revision, nil); err != nil {
+		// Already off is the state this was asking for. Reporting it as a
+		// failure turned a clean abandon into "could not put the traffic back",
+		// which was untrue — the traffic went back, and only a redundant call
+		// complained.
+		if alreadyInState(err) {
+			slog.Debug("revision was already deactivated", "app", app, "revision", revision)
+			return nil
+		}
 		return fmt.Errorf("deactivating %s: %w", revision, err)
 	}
 	timer.Done()
 	return nil
+}
+
+// activateIfStopped turns a revision back on, for the case where Container Apps
+// handed back one an earlier release had switched off.
+func (d *Driver) activateIfStopped(ctx context.Context, app, revision string) error {
+	got, err := d.revisions.GetRevision(ctx, d.file.Cloud.ResourceGroup, app, revision, nil)
+	if err != nil {
+		return fmt.Errorf("reading revision %s: %w", revision, err)
+	}
+	if got.Properties != nil && derefBool(got.Properties.Active) {
+		return nil
+	}
+
+	slog.Debug("reactivating a revision an earlier release switched off",
+		"app", app, "revision", revision)
+	timer := logging.Start("activate revision", "app", app, "revision", revision)
+	if _, err := d.revisions.ActivateRevision(
+		ctx, d.file.Cloud.ResourceGroup, app, revision, nil); err != nil {
+		if !alreadyInState(err) {
+			return fmt.Errorf("activating %s: %w", revision, err)
+		}
+	}
+	timer.Done()
+	return nil
+}
+
+// waitRunning waits for one named revision to be able to serve.
+//
+// Deliberately not the app's latest-ready pointer, which is what this used to
+// look at: that pointer is sticky and keeps naming a revision that has since
+// been deactivated, so it answers "yes" for something with no replicas. Asking
+// the revision itself cannot be fooled that way.
+func (d *Driver) waitRunning(
+	ctx context.Context,
+	app, revision string,
+	timeout time.Duration,
+) error {
+	started := time.Now()
+	deadline := started.Add(timeout)
+	var (
+		strikes    int
+		lastReason string
+	)
+
+	for {
+		got, err := d.revisions.GetRevision(ctx, d.file.Cloud.ResourceGroup, app, revision, nil)
+		if err != nil {
+			// A read that fails is never a verdict: the revision was created
+			// moments ago and ARM may still be catching up.
+			slog.Debug("could not read the revision", "app", app,
+				"revision", revision, "err", err)
+		} else if props := got.Properties; props != nil {
+			if !derefBool(props.Active) {
+				return fmt.Errorf("%s: revision %s is deactivated", app, revision)
+			}
+
+			if props.RunningState != nil &&
+				*props.RunningState == armappcontainers.RevisionRunningStateRunning &&
+				(props.HealthState == nil ||
+					*props.HealthState != armappcontainers.RevisionHealthStateUnhealthy) {
+				slog.Debug("revision is running", "app", app, "revision", revision,
+					"elapsed", time.Since(started).Round(time.Second))
+				return nil
+			}
+
+			reason, certain := d.inspectRevision(ctx, app, revision)
+			switch {
+			case reason == "":
+				strikes = 0
+			case certain:
+				return fmt.Errorf("%s: revision %s %s", app, revision, reason)
+			default:
+				strikes++
+				lastReason = reason
+				if strikes >= unhealthyStrikes {
+					return fmt.Errorf("%s: revision %s %s", app, revision, reason)
+				}
+			}
+		}
+
+		if time.Now().After(deadline) {
+			msg := fmt.Sprintf("%s: revision %s was not running within %s",
+				app, revision, timeout)
+			if lastReason != "" {
+				msg += "; it last reported that it " + lastReason
+			}
+			return errors.New(msg)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+// alreadyInState reports whether ARM refused a change because the thing is
+// already in the state that was asked for.
+func alreadyInState(err error) bool {
+	var respErr *azcore.ResponseError
+	return errors.As(err, &respErr) && respErr.ErrorCode == "RevisionAlreadyInRequestedState"
 }
 
 // deactivateRest switches off every active revision that is not one of the two

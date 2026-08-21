@@ -1,9 +1,14 @@
 package azure
 
 import (
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appcontainers/armappcontainers/v3"
 
@@ -363,5 +368,39 @@ func TestSideEnvIsNotCompared(t *testing.T) {
 	added, changed, removed := diffContainers(current, next, "main", managed)
 	if len(added)+len(changed)+len(removed) != 0 {
 		t.Errorf("the side environment produced a diff: +%v ~%v -%v", added, changed, removed)
+	}
+}
+
+// "Already deactivated" is the state the call was asking for. Treating it as a
+// failure turned a clean abandon into "could not put the traffic back", which
+// was untrue: the traffic went back and only a redundant call complained.
+func TestAlreadyDeactivatedIsNotAFailure(t *testing.T) {
+	body := `{"error":{"code":"RevisionAlreadyInRequestedState",` +
+		`"message":"Revision app--0000027 is already deactivated!."}}`
+	conflict := &azcore.ResponseError{
+		ErrorCode:  "RevisionAlreadyInRequestedState",
+		StatusCode: http.StatusConflict,
+		RawResponse: &http.Response{
+			StatusCode: http.StatusConflict,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		},
+	}
+
+	if !alreadyInState(conflict) {
+		t.Error("a 409 RevisionAlreadyInRequestedState should be read as success")
+	}
+	if !alreadyInState(fmt.Errorf("deactivating app--0000027: %w", conflict)) {
+		t.Error("it should still be recognised once wrapped")
+	}
+
+	other := &azcore.ResponseError{
+		ErrorCode:  "AuthorizationFailed",
+		StatusCode: http.StatusForbidden,
+	}
+	if alreadyInState(other) {
+		t.Error("any other ARM error is a real failure")
+	}
+	if alreadyInState(errors.New("dial tcp: no such host")) {
+		t.Error("a plain error is a real failure")
 	}
 }
