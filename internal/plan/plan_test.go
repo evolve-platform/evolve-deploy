@@ -430,6 +430,38 @@ func contains(haystack []string, needle string) bool {
 	return slices.Contains(haystack, needle)
 }
 
+func TestAnActionThatCannotWorkIsRefusedByThePlan(t *testing.T) {
+	// The reason a named action beats a curl line. Written as curl, a missing
+	// key is a 401 from an `after` hook — a red pipeline on a release that
+	// already succeeded. The action can be asked beforehand, and planning is
+	// where everything else findable is found.
+	t.Setenv("HONEYCOMB_API_KEY", "")
+
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	f := load(t, header+`
+services:
+  purchase:
+    version: v2
+    type: ecs
+    cluster: platform
+    after:
+      - {uses: honeycomb, with: {dataset: purchase}}
+`)
+
+	_, err := Build(context.Background(), f, d, nil)
+	if err == nil {
+		t.Fatal("a marker with no key anywhere was planned")
+	}
+	if !strings.Contains(err.Error(), "HONEYCOMB_API_KEY is not set") {
+		t.Errorf("error was %q, and has to name the variable", err)
+	}
+	if len(d.applied) != 0 {
+		t.Error("something was deployed by a plan that failed")
+	}
+}
+
 func TestABrokenBeforeHookStopsTheWholeRelease(t *testing.T) {
 	// The gate is the release, not the service. A schema check that fails on
 	// purchase means the release is already lost, so site must not go out

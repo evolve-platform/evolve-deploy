@@ -21,12 +21,15 @@ strategy:
   # function and not a field: a template field has to be an identifier, and
   # {{.catalog-commercetools.url}} does not even parse.
   smoke:
-    # Retries belong in the command. The revisions have just become ready, so
-    # the first call may well 503.
-    - curl -fsS --retry 5 --retry-delay 2 {{url "purchase"}}/healthz
-    - curl -fsS --retry 5 --retry-delay 2 {{url "discover"}}/healthz
+    # Retrying is the point of asking this way round. The revisions have only
+    # just become ready, so the first call may well 503 — and a curl line that
+    # gets --fail wrong is a gate a 500 walks straight through.
+    - uses: http
+      with: { url: '{{url "purchase"}}/healthz', retry: 5, delay: 2s }
+    - uses: http
+      with: { url: '{{url "discover"}}/healthz', retry: 5, delay: 2s }
     # And the one worth more than the sum of those: a request through the staged
-    # side, end to end.
+    # side, end to end. Anything the tool has no opinion about stays a command.
     - npm run smoke -- --base-url {{url "site"}}
 
 services:
@@ -40,6 +43,17 @@ services:
       - hive schema:check --service purchase --target {{.env}}
     after:
       - hive schema:publish --service purchase --target {{.env}}
+      # A marker on the graph at the moment the graph changes shape. It cannot
+      # fail the release: a note that did not arrive is worth less than the
+      # version it was about. The key comes from HONEYCOMB_API_KEY, and a plan
+      # refuses if that is not set.
+      - uses: honeycomb
+        with:
+          dataset: purchase
+          endpoint: https://api.eu1.honeycomb.io
+          url: https://github.com/evolve-platform/evolve-reference-b2b/commit/{{.version}}
+      - uses: sentry
+        with: { org: evolve, commit: '{{.version}}', repository: evolve-platform/evolve-reference-b2b }
 
   # One image, three deployables. The jobs carry no traffic, so they ride along:
   # their templates are written at the switch, never before it.
@@ -58,7 +72,7 @@ services:
 
   # Not every service has to be released a side at a time. This one is written
   # straight, the way everything is by default — so it stages nothing, and the
-  # smoke commands above cannot name it.
+  # smoke steps above cannot name it.
   catalog-commercetools:
     version: 27ec167
     type: container-app

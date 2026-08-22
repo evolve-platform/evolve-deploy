@@ -1,22 +1,32 @@
-// Package hooks runs the before and after commands of a service.
+// Package hooks runs the before, after and smoke steps of a release.
 //
-// The tool knows nothing about Hive, Sentry or anything else: a hook is a shell
-// command. That keeps deploy-time gates — check a schema before rolling out,
-// publish it after — where they belong, without teaching the deploy tool about
-// every integration a project happens to use.
+// A hook is either a command line or one of a small set of named actions. The
+// command line came first and is still the whole of the contract: deploy-time
+// gates belong next to the deploy, and the tool has no business knowing what
+// `hive schema:publish` is.
+//
+// The named actions exist for the ones that were never really commands. A
+// Honeycomb marker written as curl is six lines of flags, a hand-built JSON
+// body, a header out of an environment variable and a `|| echo` on the end so
+// that a failed annotation does not fail a release — and every value in it is
+// something the tool already knows: the version, the service, the environment,
+// the side. An action that is given those and can refuse at plan time, when the
+// key is missing rather than after the deploy, is worth the tool knowing about.
+//
+// So the set stays small and stays about what a deploy is — say a version went
+// out, ask whether something answers — and `cmd` covers everything else.
 package hooks
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"sync"
 	"text/template"
 
 	"github.com/evolve-platform/evolve-deploy/internal/logging"
-	"github.com/evolve-platform/evolve-deploy/internal/tmpl"
 )
 
 // Runner executes hook command lines.
@@ -50,17 +60,17 @@ type Runner struct {
 // {{.env}}.
 type Vars map[string]string
 
-// Run executes the commands of one service in order and stops at the first
+// Run executes the hooks of one service in order and stops at the first
 // failure. Everything they print is tagged with the service name.
-func (r *Runner) Run(ctx context.Context, service, phase string, commands []string, vars Vars) error {
+func (r *Runner) Run(ctx context.Context, service, phase string, hooks []*Hook, vars Vars) error {
 	data := make(map[string]any, len(vars))
 	for k, v := range vars {
 		data[k] = v
 	}
-	return r.RunWith(ctx, service, phase, commands, data, nil)
+	return r.RunWith(ctx, service, phase, hooks, data, nil)
 }
 
-// RunWith is Run for commands whose variables are not flat strings.
+// RunWith is Run for hooks whose variables are not flat strings.
 //
 // The release-wide smoke test needs it: there is no single URL to give a test
 // that covers a whole deploy, so it names services instead — {{.site.url}}, or
@@ -68,11 +78,11 @@ func (r *Runner) Run(ctx context.Context, service, phase string, commands []stri
 func (r *Runner) RunWith(
 	ctx context.Context,
 	service, phase string,
-	commands []string,
+	hooks []*Hook,
 	data any,
 	funcs template.FuncMap,
 ) error {
-	if len(commands) == 0 {
+	if len(hooks) == 0 {
 		return nil
 	}
 
@@ -84,19 +94,27 @@ func (r *Runner) RunWith(
 		defer out.flush()
 	}
 
-	for _, raw := range commands {
-		line, err := tmpl.RenderWith(raw, data, funcs)
+	for _, hook := range hooks {
+		action, err := hook.Action()
+		if err != nil {
+			// Refused while the config was read, so this is unreachable from
+			// the CLI. Reported rather than skipped all the same: a hook that
+			// silently does not run is the failure that is hardest to see.
+			return fmt.Errorf("%s hook: %w", phase, err)
+		}
+
+		step, err := action.Render(data, funcs)
 		if err != nil {
 			return fmt.Errorf("%s hook: %w", phase, err)
 		}
 
 		if r.DryRun {
-			fmt.Fprintf(r.Out, "    %s: %s\n", phase, line)
+			fmt.Fprintf(r.Out, "    %s: %s\n", phase, step.Line())
 			continue
 		}
 
 		timer := logging.Start("run hook", "service", service, "phase", phase,
-			"command", line)
+			"step", step.Line())
 
 		// Held rather than dropped: output nobody wants on a green run is the
 		// only account of a red one.
@@ -106,19 +124,21 @@ func (r *Runner) RunWith(
 			sink = &held
 		}
 
-		// Through a shell, because a hook is written the way it would be typed:
-		// pipes, quoting and $VARS all work as expected.
-		cmd := exec.CommandContext(ctx, "sh", "-c", line)
-		cmd.Dir = r.Dir
-		cmd.Stdout = sink
-		cmd.Stderr = sink
-		if err := cmd.Run(); err != nil {
+		var note noted
+		switch err := step.Run(ctx, &Exec{Dir: r.Dir, Out: sink}); {
+		case err == nil:
+		case errors.As(err, &note):
+			// Straight to Out rather than through the sink, because this is the
+			// one thing a quiet run still has to say: an annotation that went
+			// missing leaves nothing else behind to notice it by.
+			fmt.Fprintf(out, "%s\n", note)
+		default:
 			if held.Len() > 0 {
-				// Through the prefix writer, so a failure in one service's hook is
-				// still attributed when three ran at once.
+				// Through the prefix writer, so a failure in one service's hook
+				// is still attributed when three ran at once.
 				_, _ = out.Write(held.Bytes())
 			}
-			return fmt.Errorf("%s hook failed: %s: %w", phase, line, err)
+			return fmt.Errorf("%s hook failed: %s: %w", phase, step.Line(), err)
 		}
 		timer.Done()
 	}
@@ -183,7 +203,8 @@ func (w *prefixWriter) flush() {
 	}
 }
 
-// Validate renders every command without running any.
+// Validate renders every hook without running any, and asks the ones that can
+// refuse whether they would.
 //
 // It exists because of `after`. A hook naming a variable that does not exist is
 // an error either way — tmpl.Render runs with missingkey=error, so a hook can
@@ -192,19 +213,31 @@ func (w *prefixWriter) flush() {
 // succeeded. A typo in a variable name must not turn a working deploy into a
 // red pipeline, so the rendering is checked during planning, where every other
 // findable failure is found.
-func Validate(commands []string, vars Vars) error {
+func Validate(hooks []*Hook, vars Vars) error {
 	data := make(map[string]any, len(vars))
 	for k, v := range vars {
 		data[k] = v
 	}
-	return ValidateWith(commands, data, nil)
+	return ValidateWith(hooks, data, nil)
 }
 
 // ValidateWith is Validate for the nested data a release-wide smoke test uses.
-func ValidateWith(commands []string, data any, funcs template.FuncMap) error {
-	for _, raw := range commands {
-		if _, err := tmpl.RenderWith(raw, data, funcs); err != nil {
+func ValidateWith(hooks []*Hook, data any, funcs template.FuncMap) error {
+	for _, hook := range hooks {
+		action, err := hook.Action()
+		if err != nil {
 			return err
+		}
+		if _, err := action.Render(data, funcs); err != nil {
+			return err
+		}
+		// The same argument one step further out. A marker with no API key
+		// anywhere is a hook that cannot work, and finding that out from an
+		// `after` hook means finding it out from a release that succeeded.
+		if c, ok := action.(Checker); ok {
+			if err := c.Check(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

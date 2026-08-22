@@ -27,29 +27,19 @@ func renderGate(w io.Writer, p *plan.Plan) {
 	}
 
 	side, previous := p.Side()
-	commands := p.SmokeCommands()
-	if len(commands) == 0 {
-		fmt.Fprintf(w, "The whole of %s is staged, then switched. No smoke commands, "+
+	smoke := p.SmokeHooks()
+	if len(smoke) == 0 {
+		fmt.Fprintf(w, "The whole of %s is staged, then switched. No smoke steps, "+
 			"so nothing is checked in between.\n", side)
 		return
 	}
 
 	fmt.Fprintf(w, "Once all of %s is staged, %s before any traffic moves:\n",
-		side, pluralise(len(commands), "smoke command"))
-	for _, line := range commands {
-		fmt.Fprintf(w, "  %s\n", oneLine(line))
+		side, pluralise(len(smoke), "smoke step"))
+	for _, hook := range smoke {
+		fmt.Fprintf(w, "  %s\n", hook.Describe())
 	}
 	fmt.Fprintf(w, "A failure there switches nothing: %s keeps serving.\n", previous)
-}
-
-// oneLine unfolds a YAML block scalar so a command that was written over three
-// lines of curl flags prints as the one thing it is.
-//
-// Not truncated: the plan already prints before and after hooks in full, and the
-// interesting part of a smoke command — the path it asks for — is at the end,
-// which is exactly what a width limit would cut off.
-func oneLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
 }
 
 // RenderPlan writes a human-readable plan.

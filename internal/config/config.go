@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/evolve-platform/evolve-deploy/internal/hooks"
 )
 
 // Cloud is the platform a config file targets. One cloud per repo.
@@ -88,7 +90,7 @@ type Strategy struct {
 	//
 	// A check of one revision on its own has not been lost: it is a line in
 	// that same set, addressed by name — `curl -fsS {{url "purchase"}}/healthz`.
-	Smoke []string `yaml:"smoke"`
+	Smoke []*hooks.Hook `yaml:"smoke"`
 
 	// Labels are the two side names. They do nothing functionally — the tool
 	// reads them to know which traffic entries are its own, and to name them in
@@ -320,8 +322,8 @@ type Service struct {
 
 	// Hooks run once per service, not per target — publishing a schema five
 	// times for a service with four jobs is not what anyone wants.
-	Before []string `yaml:"before"`
-	After  []string `yaml:"after"`
+	Before []*hooks.Hook `yaml:"before"`
+	After  []*hooks.Hook `yaml:"after"`
 
 	// DependsOn names services that must finish before this one starts. For a
 	// frontend that calls a backend, deploying both at once means the window
@@ -549,6 +551,12 @@ func (f *File) validate() error {
 		add("%s", msg)
 	}
 
+	if f.Strategy != nil {
+		for _, msg := range hooks.Check("strategy.smoke", f.Strategy.Smoke) {
+			add("%s", msg)
+		}
+	}
+
 	if len(f.Services) == 0 {
 		add("services: no services defined")
 	}
@@ -578,6 +586,15 @@ func (f *File) validate() error {
 		for _, msg := range validateStrategy(
 			fmt.Sprintf("services.%s.strategy", name), c.strategyRaw, false) {
 			add("%s", msg)
+		}
+
+		// A hook entry keeps what went wrong with it rather than failing the
+		// decode, so that it lands here: in the same sorted list as every other
+		// mistake, under the path that says which entry it was.
+		for phase, hs := range map[string][]*hooks.Hook{"before": c.Before, "after": c.After} {
+			for _, msg := range hooks.Check(fmt.Sprintf("services.%s.%s", name, phase), hs) {
+				add("%s", msg)
+			}
 		}
 
 		seen := map[string]bool{}

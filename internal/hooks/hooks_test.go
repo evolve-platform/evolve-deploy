@@ -8,12 +8,22 @@ import (
 	"testing"
 )
 
+// cmds is how a test writes the plain command hooks that every config is still
+// mostly made of.
+func cmds(lines ...string) []*Hook {
+	hs := make([]*Hook, 0, len(lines))
+	for _, line := range lines {
+		hs = append(hs, Command(line))
+	}
+	return hs
+}
+
 func TestRunSubstitutesAndCaptures(t *testing.T) {
 	var out bytes.Buffer
 	r := &Runner{Out: &out, Verbose: true}
 
 	err := r.Run(context.Background(), "purchase", "after",
-		[]string{"echo published {{.name}} at {{.version}} to {{.env}}"},
+		cmds("echo published {{.name}} at {{.version}} to {{.env}}"),
 		Vars{"name": "purchase", "version": "abc1234", "env": "tst"})
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +40,7 @@ func TestRunStopsAtTheFirstFailure(t *testing.T) {
 	r := &Runner{Out: &out}
 
 	err := r.Run(context.Background(), "purchase", "before",
-		[]string{"exit 1", "echo should-not-run"},
+		cmds("exit 1", "echo should-not-run"),
 		Vars{})
 	if err == nil {
 		t.Fatal("expected an error")
@@ -47,7 +57,7 @@ func TestUnknownVariableIsAnError(t *testing.T) {
 	r := &Runner{Out: &out}
 
 	err := r.Run(context.Background(), "purchase", "after",
-		[]string{"hive publish --commit {{.nope}}"}, Vars{"version": "abc"})
+		cmds("hive publish --commit {{.nope}}"), Vars{"version": "abc"})
 	if err == nil {
 		t.Fatal("expected an error for an unknown variable")
 	}
@@ -58,7 +68,7 @@ func TestDryRunPrintsWithoutRunning(t *testing.T) {
 	r := &Runner{Out: &out, DryRun: true}
 
 	if err := r.Run(context.Background(), "purchase", "before",
-		[]string{"exit 1"}, Vars{}); err != nil {
+		cmds("exit 1"), Vars{}); err != nil {
 		t.Fatalf("dry run should not execute anything: %v", err)
 	}
 	if !strings.Contains(out.String(), "before: exit 1") {
@@ -71,7 +81,7 @@ func TestOutputIsTaggedWithTheService(t *testing.T) {
 	r := &Runner{Out: &out, Verbose: true}
 
 	if err := r.Run(context.Background(), "discover", "before",
-		[]string{"echo checking schema"}, Vars{}); err != nil {
+		cmds("echo checking schema"), Vars{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := out.String(); got != "[discover] checking schema\n" {
@@ -87,7 +97,7 @@ func TestTagsAreAlignedToTheWidestName(t *testing.T) {
 
 	for _, name := range []string{"discover", "site"} {
 		if err := r.Run(context.Background(), name, "before",
-			[]string{"echo x"}, Vars{}); err != nil {
+			cmds("echo x"), Vars{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -108,7 +118,7 @@ func TestATrailingPartialLineIsNotSwallowed(t *testing.T) {
 	r := &Runner{Out: &out, Verbose: true}
 
 	if err := r.Run(context.Background(), "site", "after",
-		[]string{"printf 'no trailing newline'"}, Vars{}); err != nil {
+		cmds("printf 'no trailing newline'"), Vars{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := out.String(); got != "[site] no trailing newline\n" {
@@ -127,7 +137,7 @@ func TestConcurrentHooksDoNotShredEachOther(t *testing.T) {
 	for _, name := range []string{"discover", "purchase", "site"} {
 		wg.Go(func() {
 			err := r.Run(context.Background(), name, "before",
-				[]string{"for i in $(seq 1 50); do echo " + name + "-$i; done"}, Vars{})
+				cmds("for i in $(seq 1 50); do echo "+name+"-$i; done"), Vars{})
 			if err != nil {
 				t.Error(err)
 			}
@@ -162,7 +172,7 @@ func TestASucceedingHookIsSilentButAFailingOneIsNot(t *testing.T) {
 	var quiet bytes.Buffer
 	r := &Runner{Out: &quiet}
 	if err := r.Run(context.Background(), "purchase", "before",
-		[]string{"echo checking schema"}, nil); err != nil {
+		cmds("echo checking schema"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if quiet.String() != "" {
@@ -172,7 +182,7 @@ func TestASucceedingHookIsSilentButAFailingOneIsNot(t *testing.T) {
 	var loud bytes.Buffer
 	r = &Runner{Out: &loud}
 	err := r.Run(context.Background(), "purchase", "before",
-		[]string{"echo breaking change detected; exit 1"}, nil)
+		cmds("echo breaking change detected; exit 1"), nil)
 	if err == nil {
 		t.Fatal("a hook that exited non-zero was reported as success")
 	}

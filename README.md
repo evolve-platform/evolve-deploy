@@ -266,9 +266,12 @@ plus `EVOLVE_DEPLOY_SIDE`, which the tool writes itself.
 
 ## Hooks
 
-Shell commands, run once per service. The tool knows nothing about Hive or
-anything else: deploy-time gates belong next to the deploy rather than in
-Terraform, but they do not belong *inside* the tool.
+Steps run once per service, before and after its deploy. A hook is either a
+command line or one of a small set of named actions.
+
+The command line came first and is still the whole of the contract: deploy-time
+gates belong next to the deploy rather than in Terraform, but they do not belong
+*inside* the tool, and it has no business knowing what `hive schema:publish` is.
 
 A hook that succeeds prints nothing. There are three of them per service on a
 normal release and each is a CLI with plenty to say, none of which is the answer
@@ -284,6 +287,8 @@ services:
       - hive schema:check   --service purchase --commit {{.version}}
     after:
       - hive schema:publish --service purchase --commit {{.version}}
+      - uses: honeycomb
+        with: { dataset: purchase }
     targets:
       - { type: container-app, name: evolve-tst-purchase }
 ```
@@ -303,6 +308,83 @@ registration call failed is worse than the missing registration.
 So the order is: all `before` hooks → all deploys → each service's `after`.
 Nothing runs when there is nothing to deploy, and a service with no work has
 neither hook run.
+
+### Actions
+
+Three forms, and the first two are the same thing:
+
+```yaml
+after:
+  - hive schema:publish --commit {{.version}}       # a command line
+  - cmd: hive schema:publish --commit {{.version}}  # the same, written out
+  - uses: honeycomb                                 # a named action
+    with: { dataset: purchase }
+```
+
+The actions exist for the hooks that were never really commands. A Honeycomb
+marker written as curl is six lines of flags, a hand-built JSON body, a header
+out of an environment variable and a `|| echo` on the end so a failed annotation
+does not fail the release — and every value in it is something the tool already
+knows: the version, the service, the environment, the side. So the set stays
+small and stays about what a deploy *is* — say a version went out, ask whether
+something answers — and `cmd` covers everything else.
+
+An action can also refuse while there is still a plan to refuse. A marker whose
+API key is nowhere in the environment fails the plan, with the name of the
+variable, rather than turning up as a 401 from an `after` hook on a release that
+already succeeded.
+
+`uses: honeycomb` marks the deploy on a dataset. `dataset` is required — `__all__`
+marks the whole environment — and everything else has a default.
+
+| Option | | |
+|---|---|---|
+| `dataset` | the dataset to mark | required |
+| `message` | | default `{{.name}} {{.version}}` |
+| `type` | groups markers so they share a colour | default `deploy` |
+| `url` | what the marker links to, usually the commit | default none |
+| `endpoint` | | default `https://api.honeycomb.io`, EU is `https://api.eu1.honeycomb.io` |
+| `key_env` | which variable holds the key | default `HONEYCOMB_API_KEY` |
+
+`uses: sentry` registers the release and then the deploy of it — two things
+Sentry knows, because the same release is deployed to tst and later to prd, and
+only the second call differs.
+
+| Option | | |
+|---|---|---|
+| `org` | | required |
+| `project` / `projects` | one, or several | default `{{.name}}` |
+| `version` | what Sentry calls a release | default `{{.version}}` |
+| `environment` | | default `{{.env}}` |
+| `repository` + `commit` | associates the release with what is in it | default none |
+| `endpoint` | | default `https://sentry.io/api/0` |
+| `key_env` | | default `SENTRY_AUTH_TOKEN` |
+
+Neither of those two can fail a release. An annotation that did not arrive is
+reported and forgiven: an `after` hook runs on a deploy that has already
+succeeded, and pulling a working version because a note about it went missing
+costs more than the missing note. That is what the `|| echo` on the end of every
+curl line was already doing, in one place instead of fourteen.
+
+`uses: http` asks for one url and says whether the answer was the expected one.
+It replaces the row of flags this was written as — `--fail --silent --show-error
+--max-time --retry --retry-delay --retry-connrefused` — where every one had to be
+remembered and leaving off `--fail` meant a 500 walked through the gate.
+
+| Option | | |
+|---|---|---|
+| `url` | | required |
+| `method` | | default `GET` |
+| `headers` / `body` | | default none |
+| `status` | the one status that counts as healthy | default any 2xx |
+| `timeout` | bounds one attempt | default `10s` |
+| `retry` | further attempts after the first | default `0` |
+| `delay` | between attempts | default `3s` |
+
+Retrying is what makes it usable as a smoke test: a side that has staged is not
+always answering the instant staging returns, and the first refused connection is
+nearly always that rather than a broken deploy. A failure reports the status and
+what the body said, which is where a health route explains itself.
 
 ## Order
 
@@ -350,7 +432,8 @@ traffic, runs a command against it, and switches in one write:
 strategy:
   type: blue-green
   smoke:
-    - curl -fsS --retry 5 --retry-delay 2 {{url "site"}}/healthz
+    - uses: http
+      with: { url: '{{url "site"}}/healthz', retry: 5, delay: 2s }
 
 services:
   site:
@@ -375,7 +458,7 @@ services:
 | Field | | |
 |---|---|---|
 | `type` | `direct` \| `blue-green` | default `direct` |
-| `smoke` | commands run against the staged side | empty = switch straight away |
+| `smoke` | hooks run against the staged side | empty = switch straight away |
 | `labels` | the two side names | default `[blue, green]` |
 | `env` | environment per side | see below |
 | `keep_warm` | leave the previous version running after the switch | default `false`, Container Apps only |
@@ -435,7 +518,7 @@ Two properties worth knowing:
   reading the config rather than resolved by picking a behaviour for it.
 
 **A release is one release.** Every staged service is staged first, then every
-smoke command runs, then all of the traffic moves — not stage-smoke-switch per
+smoke step runs, then all of the traffic moves — not stage-smoke-switch per
 service. Which means a service with nothing to change is staged as well, at the
 version it already runs: the side is a property of the environment, and a side
 missing an app is not a stack you can point a smoke test at. (A revision can
@@ -596,9 +679,8 @@ rather than a field, because a template field has to be an identifier and
 in this release fails the plan rather than resolving to an empty string: a gate
 pointed at nothing would pass. On a `direct`
 service the side variables are absent rather than empty, so a hook naming one
-fails loudly instead of publishing to `tst-`. Every hook line is rendered while
-planning, so a typo in a variable name cannot fail a release that already
-succeeded.
+fails loudly instead of publishing to `tst-`. Every hook is rendered while planning,
+so a typo in a variable name cannot fail a release that already succeeded.
 
 The service itself is told too: every blue-green target gets
 `EVOLVE_DEPLOY_SIDE=blue|green` in its environment. A request cannot carry the
