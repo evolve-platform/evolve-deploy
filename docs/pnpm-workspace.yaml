@@ -1,0 +1,12 @@
+# A newly published version is the shape a compromised one arrives in, so
+# nothing under a fortnight old is installed. In minutes, which is pnpm's unit.
+minimumReleaseAge: 20160
+
+# Lifecycle scripts are off by default and this makes an unapproved one an
+# error rather than a package that quietly did not build — the same choice the
+# tool itself makes everywhere: refuse, do not fall back to something lesser.
+strictDepBuilds: true
+
+allowBuilds:
+  esbuild: true
+  sharp: true
