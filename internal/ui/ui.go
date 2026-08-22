@@ -166,10 +166,12 @@ func renderRollout(w io.Writer, width int, cp *plan.ServicePlan, ch *target.Chan
 			ch.Sides.Idle.Label, strings.Join(names, ", "))
 	}
 
-	// The previous version stays running behind the new one, and naming it is
-	// the difference between trusting that and hoping so.
-	fmt.Fprintf(w, "  %-*s rollback stays on %s %s\n", width, "",
-		ch.Sides.Active.Label, orNone(ch.FromVersion))
+	// What this falls back to, and whether that fallback is still there, is the
+	// thing worth knowing before pressing go. Naming it is the difference
+	// between trusting it and hoping so — and the three answers are genuinely
+	// different, so there are three lines rather than one hedged one.
+	fmt.Fprintf(w, "  %-*s rollback is %s %s (%s)\n", width, "",
+		ch.Sides.Active.Label, orNone(ch.FromVersion), ch.Fallback)
 }
 
 // Summary is the one-line result, for the end of a pipeline log.

@@ -104,7 +104,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 	if sidecar.GetImage() != "repo/otel:v9" {
 		t.Errorf("the sidecar image was changed to %q", sidecar.GetImage())
 	}
-	if envFingerprint(sidecar.GetEnv())["OTEL_SERVICE_NAME"] != "=purchase" {
+	if envFingerprint(sidecar.GetEnv(), nil)["OTEL_SERVICE_NAME"] != "=purchase" {
 		t.Error("the sidecar environment was changed")
 	}
 }
@@ -115,7 +115,7 @@ func TestReferencesBecomeSecretKeyRefs(t *testing.T) {
 		{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "purchase-ctp"}},
 	})
 
-	fp := envFingerprint(got)
+	fp := envFingerprint(got, nil)
 	if fp["LOG_LEVEL"] != "=info" {
 		t.Errorf("LOG_LEVEL = %q", fp["LOG_LEVEL"])
 	}
@@ -151,7 +151,7 @@ func TestDiffEnvIgnoresRotations(t *testing.T) {
 		},
 	})
 
-	added, changed, removed := diffEnv(current, next, "app")
+	added, changed, removed := diffEnv(current, next, "app", nil)
 	if !reflect.DeepEqual(added, []string{"NEW"}) {
 		t.Errorf("added = %v", added)
 	}

@@ -157,6 +157,10 @@ func TestStrategyValidation(t *testing.T) {
 		name:    "smoke on a direct release has nothing to run against",
 		body:    "strategy:\n  type: direct\n  smoke: [ true ]\n",
 		wantErr: "needs a staged side",
+	}, {
+		name:    "keep_warm on a direct release has no side to keep",
+		body:    "strategy:\n  type: direct\n  keep_warm: true\n",
+		wantErr: "the side that stops serving",
 	}}
 
 	for _, c := range cases {
@@ -376,5 +380,63 @@ services:
 	}
 	if got := strings.Join(f.Services["site"].DependsOn, ","); got != "purchase" {
 		t.Errorf("depends_on = %q", got)
+	}
+}
+
+// keep_warm is the cost knob: off, the version that stopped serving is switched
+// off with it. It is a pointer so it can go both ways — a file that pays to keep
+// every side warm and one service that is not worth it.
+func TestKeepWarmMergesBothWays(t *testing.T) {
+	f, err := loadStrategy(t, azureHeader+`
+strategy:
+  type: blue-green
+  keep_warm: true
+
+services:
+  inherits:
+    version: abc1234
+    type: container-app
+
+  not-worth-it:
+    version: abc1234
+    type: container-app
+    strategy:
+      keep_warm: false
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !f.Services["inherits"].Strategy.KeepsWarm() {
+		t.Error("inherits should have taken the file's keep_warm")
+	}
+	if f.Services["not-worth-it"].Strategy.KeepsWarm() {
+		t.Error("a service must be able to turn off what the file turned on")
+	}
+}
+
+// Saying nothing means the previous version is switched off, because a version
+// nobody is using should not cost anything.
+func TestKeepWarmIsOffByDefault(t *testing.T) {
+	f, err := loadStrategy(t, azureHeader+`
+strategy:
+  type: blue-green
+
+services:
+  site:
+    version: abc1234
+    type: container-app
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := f.Services["site"].Strategy
+	if s.KeepsWarm() {
+		t.Error("keep_warm must be opt-in")
+	}
+	// It reaches the driver through the target, which is what Settle reads.
+	if f.Services["site"].Targets[0].Strategy.KeepsWarm() {
+		t.Error("the target disagrees with the service")
 	}
 }

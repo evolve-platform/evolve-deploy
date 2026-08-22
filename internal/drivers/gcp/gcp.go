@@ -31,8 +31,9 @@ import (
 type Driver struct {
 	file *config.File
 
-	services *run.ServicesClient
-	secrets  *secretmanager.Client
+	services  *run.ServicesClient
+	revisions *run.RevisionsClient
+	secrets   *secretmanager.Client
 }
 
 // New builds a driver from application default credentials — in CI the token
@@ -42,11 +43,18 @@ func New(ctx context.Context, f *config.File) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
+	// Read-only, and only on the blue-green path: with two live revisions the
+	// service's own template is whichever was created last, so the version that
+	// is serving has to be read off the revision that is serving.
+	revisions, err := run.NewRevisionsClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcp: %w", err)
+	}
 	secrets, err := secretmanager.NewClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
-	return &Driver{file: f, services: services, secrets: secrets}, nil
+	return &Driver{file: f, services: services, revisions: revisions, secrets: secrets}, nil
 }
 
 func (d *Driver) Name() string { return "gcp" }
@@ -73,6 +81,9 @@ func (d *Driver) Resolver() refs.Resolver { return &resolver{d: d} }
 func (d *Driver) Plan(ctx context.Context, want *target.Desired) (*target.Change, error) {
 	switch want.Target.Type {
 	case config.TypeCloudRun:
+		if want.Target.Strategy.IsBlueGreen() {
+			return d.planServiceBlueGreen(ctx, want)
+		}
 		return d.planService(ctx, want)
 	default:
 		return nil, &target.ErrNotImplemented{Cloud: "gcp", Type: want.Target.Type}

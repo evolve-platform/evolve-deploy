@@ -455,6 +455,14 @@ func planService(
 		slog.Debug("change needed",
 			"target", fmt.Sprintf("%s/%s", t.Type, t.Name),
 			"from", ch.FromVersion, "to", ch.ToVersion, "reason", ch.Reason)
+
+		// Asked once, here, so the plan and the apply say the same thing
+		// without either of them knowing which cloud they are on.
+		if ch.Sides != nil {
+			if r, ok := d.(target.Rollout); ok {
+				ch.Fallback = r.Fallback(t)
+			}
+		}
 		cp.Changes = append(cp.Changes, ch)
 	}
 

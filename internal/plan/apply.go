@@ -490,9 +490,12 @@ func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options)
 	for _, it := range routable {
 		// After a blue-green deploy the question is not only whether it worked
 		// but what it falls back to, and this is the only place that knows.
-		fmt.Fprintf(o.Out, "  %-*s %s serves %s, %s keeps %s\n", o.Width,
+		// Whether that fallback is warm or stopped is part of the answer: it is
+		// the difference between a rollback that is one write and one that
+		// starts a container first.
+		fmt.Fprintf(o.Out, "  %-*s %s serves %s, rollback is %s %s (%s)\n", o.Width,
 			it.ch.Target.Label(), it.ch.Sides.Idle.Label, it.ch.ToVersion,
-			it.ch.Sides.Active.Label, orNone(it.ch.FromVersion))
+			it.ch.Sides.Active.Label, orNone(it.ch.FromVersion), it.ch.Fallback)
 	}
 
 	// The after hooks are still per service and still run only once its own

@@ -58,7 +58,7 @@ func (d *Driver) planService(ctx context.Context, want *target.Desired) (*target
 		return nil, err
 	}
 
-	added, changed, removed := diffEnv(current, next, name)
+	added, changed, removed := diffEnv(current, next, name, nil)
 	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
 		return nil, nil
 	}
@@ -215,9 +215,23 @@ func renderEnv(env []target.EnvVar) []*runpb.EnvVar {
 // envFingerprint flattens an environment for comparison. A reference is
 // compared by what it points at: the tool cannot see the value, and a rotated
 // secret is not a change it should claim to have made.
-func envFingerprint(env []*runpb.EnvVar) map[string]string {
+//
+// `ignore` is what the tool writes per side. The side alternates every release,
+// so the desired value never matches what the serving revision carries;
+// comparing it would report a change on every run, which would deploy on every
+// run, which would flip the sides forever with no version ever changing.
+// Anything `strategy.env` sets per side is skipped for the same reason.
+func envFingerprint(env []*runpb.EnvVar, ignore []string) map[string]string {
+	skip := map[string]bool{target.SideEnvVar: true}
+	for _, name := range ignore {
+		skip[name] = true
+	}
+
 	out := make(map[string]string, len(env))
 	for _, e := range env {
+		if skip[e.GetName()] {
+			continue
+		}
 		if src := e.GetValueSource().GetSecretKeyRef(); src != nil {
 			out[e.GetName()] = "->" + src.GetSecret()
 			continue
@@ -227,9 +241,13 @@ func envFingerprint(env []*runpb.EnvVar) map[string]string {
 	return out
 }
 
-func diffEnv(current, next *runpb.RevisionTemplate, name string) (added, changed, removed []string) {
-	have := envFingerprint(findContainer(current.GetContainers(), name).GetEnv())
-	want := envFingerprint(findContainer(next.GetContainers(), name).GetEnv())
+func diffEnv(
+	current, next *runpb.RevisionTemplate,
+	name string,
+	ignore []string,
+) (added, changed, removed []string) {
+	have := envFingerprint(findContainer(current.GetContainers(), name).GetEnv(), ignore)
+	want := envFingerprint(findContainer(next.GetContainers(), name).GetEnv(), ignore)
 
 	for k, wv := range want {
 		hv, ok := have[k]

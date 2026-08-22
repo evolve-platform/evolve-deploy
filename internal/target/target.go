@@ -8,6 +8,7 @@ package target
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/evolve-platform/evolve-deploy/internal/config"
@@ -79,6 +80,10 @@ type Change struct {
 	// and which one it is coming from. Nil for a direct change, and nil for a
 	// target that rides along without carrying traffic.
 	Sides *Sides
+
+	// Fallback is Rollout.Fallback for this target, filled in while planning so
+	// the plan can say what a rollback would find without holding a driver.
+	Fallback string
 
 	// Carry marks a target that is staged only to keep the side complete:
 	// nothing about it changed, and it is here because the side is a property of
@@ -222,6 +227,17 @@ type Rollout interface {
 	// shares an image with and is written at the switch.
 	Routable(t config.TargetType) bool
 
+	// Pointable reports whether traffic here can be moved to a side by name,
+	// outside a release. It is what `rollback` and `traffic --to` need, and it
+	// is not the same question as Routable.
+	//
+	// On a platform that owns the sides itself — ECS swaps its own target
+	// groups and terminates the old tasks — traffic is carried but no side
+	// stands still long enough to be named. Such a target is routable, because
+	// a release does move its traffic, and not pointable, because nothing
+	// outside a release can.
+	Pointable(t config.TargetType) bool
+
 	// Sides reads the current split. It fails when no single label has 100%.
 	Sides(ctx context.Context, t *config.Target) (*Sides, error)
 
@@ -238,9 +254,15 @@ type Rollout interface {
 	// the whole exercise: nothing that anyone saw has happened yet.
 	Abandon(ctx context.Context, ch *Change) error
 
-	// Settle restates the invariant — two labelled revisions, everything else
+	// Settle restates the invariant — one revision running, everything else
 	// deactivated — and is rewritten on every successful deploy even when it
 	// already held, so a run that died halfway is tidied by the next release.
+	//
+	// The side that stopped serving keeps its label at 0%, because that is the
+	// rollback target and it has to stay named. It does not keep its replicas:
+	// a version nobody is using should not cost anything. Point starts it again
+	// when the rollback comes. `strategy.keep_warm` leaves it running instead,
+	// for the environment where a cold start is the more expensive half.
 	//
 	// A failure here is a warning, not a failed deploy: the traffic is on the
 	// new version and removing a working version over a cleanup call is worse
@@ -249,7 +271,35 @@ type Rollout interface {
 
 	// Point puts 100% of the traffic on one label without staging anything. It
 	// is the manual rollback, and the way out of a split someone made by hand.
+	//
+	// It starts the revision it is about to hand traffic to when that revision
+	// is stopped, and waits for it, because after a settle that is the normal
+	// state of the side being rolled back to.
 	Point(ctx context.Context, t *config.Target, label string) error
+
+	// Fallback describes in a word or two what a rollback would find, for the
+	// line both the plan and the apply print.
+	//
+	// It belongs to the driver and not to the orchestrator because the answer
+	// is genuinely different per platform, and all three are true: a Container
+	// Apps revision is stopped and can be started again, a Cloud Run revision
+	// scales itself to zero and needs nothing, and ECS has terminated the old
+	// tasks and left nothing behind at all. Deciding this in package plan would
+	// mean the choreography knowing which cloud it is on, which is the one
+	// thing it does not.
+	Fallback(t *config.Target) string
+
+	// Tidy switches off every revision that is not serving, reading what that
+	// is off the platform rather than from a release.
+	//
+	// It is the same invariant Settle restores, for the paths that move traffic
+	// without staging anything. Without it a rollback leaves the side it moved
+	// away from running: Point starts what it is about to serve, and nothing
+	// would ever stop what it stopped serving.
+	//
+	// Like Settle, a failure here is a warning rather than a failed command.
+	// The traffic moved, which is what was asked for.
+	Tidy(ctx context.Context, t *config.Target) error
 
 	// Traffic reads the split as it is, without judging it.
 	//
@@ -257,6 +307,27 @@ type Rollout interface {
 	// "show me what is going on" has to work precisely when something is
 	// wrong.
 	Traffic(ctx context.Context, t *config.Target) ([]TrafficEntry, error)
+}
+
+// ErrNoWindow is what Undo returns when there is nothing left to reverse.
+//
+// Not a failure: it is the normal state of a target that was deployed some time
+// ago, and the caller turns it into advice rather than an error.
+var ErrNoWindow = errors.New("the release has finished; there is nothing left to reverse")
+
+// Undoer is implemented by drivers whose platform owns the rollout and offers a
+// window to reverse it rather than a standing side to point at.
+//
+// It is the other half of Pointable. On Container Apps and Cloud Run the way
+// back is Point: name the side, move the weights, and that stays true forever
+// because the side stays there. On ECS the way back is Undo: while the platform
+// still has the previous version running it can put the traffic back, and once
+// it has cleaned that up the way back is a deploy. Two shapes, because the
+// platforms genuinely differ — a driver implements whichever is true of it.
+//
+// The string is what happened, in a phrase fit for a line of output.
+type Undoer interface {
+	Undo(ctx context.Context, t *config.Target) (string, error)
 }
 
 // TrafficEntry is one row of a target's traffic split.

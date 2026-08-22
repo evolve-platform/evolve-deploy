@@ -1,0 +1,319 @@
+package gcp
+
+import (
+	"strings"
+	"testing"
+
+	"cloud.google.com/go/run/apiv2/runpb"
+
+	"github.com/evolve-platform/evolve-deploy/internal/refs"
+	"github.com/evolve-platform/evolve-deploy/internal/target"
+)
+
+func tt(tag, revision string, percent int32) *runpb.TrafficTarget {
+	return &runpb.TrafficTarget{
+		Type:     runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION,
+		Tag:      tag,
+		Revision: revision,
+		Percent:  percent,
+	}
+}
+
+func ttLatest(tag string, percent int32) *runpb.TrafficTarget {
+	return &runpb.TrafficTarget{
+		Type:    runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST,
+		Tag:     tag,
+		Percent: percent,
+	}
+}
+
+var labels = []string{"blue", "green"}
+
+// The refusal table, and it is the same rule as on Container Apps: active is
+// the tag with 100% of the traffic, and every other shape is a refusal rather
+// than a guess. Only the vocabulary differs — tag for label, percent for
+// weight.
+func TestReadSides(t *testing.T) {
+	cases := []struct {
+		name          string
+		traffic       []*runpb.TrafficTarget
+		wantActive    string
+		wantIdle      string
+		wantIdleRev   string
+		wantPinNeeded bool
+		wantErr       string
+	}{{
+		name:        "one side serving, the other behind it",
+		traffic:     []*runpb.TrafficTarget{tt("blue", "site-00001", 100), tt("green", "site-00002", 0)},
+		wantActive:  "blue",
+		wantIdle:    "green",
+		wantIdleRev: "site-00002",
+	}, {
+		// A service deployed this way for the first time has one side and no
+		// other, and that is not an error — it is where everyone starts.
+		name:       "the idle tag does not exist yet",
+		traffic:    []*runpb.TrafficTarget{tt("blue", "site-00001", 100)},
+		wantActive: "blue",
+		wantIdle:   "green",
+	}, {
+		// "Whatever is newest" is a rule, not a reference, and it has to become
+		// a fact before a revision is created — otherwise the staged one takes
+		// all the traffic the moment it exists.
+		name:          "the serving tag is on latest",
+		traffic:       []*runpb.TrafficTarget{ttLatest("blue", 100), tt("green", "site-00002", 0)},
+		wantActive:    "blue",
+		wantIdle:      "green",
+		wantIdleRev:   "site-00002",
+		wantPinNeeded: true,
+	}, {
+		name:    "a split has no active side",
+		traffic: []*runpb.TrafficTarget{tt("blue", "site-00001", 60), tt("green", "site-00002", 40)},
+		wantErr: "traffic is split",
+	}, {
+		// Cloud Run's own default. There is no tag to fall back to, so this is
+		// a service nobody has set up for this yet rather than a broken one.
+		name:    "an empty block is the default of everything to newest",
+		traffic: nil,
+		wantErr: "the traffic block is empty",
+	}, {
+		name:    "everything on an untagged entry",
+		traffic: []*runpb.TrafficTarget{tt("", "site-00001", 100)},
+		wantErr: "no tag",
+	}, {
+		name:    "a tag the config does not know",
+		traffic: []*runpb.TrafficTarget{tt("staging", "site-00001", 100)},
+		wantErr: "not one of blue or green",
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := readSides(c.traffic, labels)
+
+			if c.wantErr != "" {
+				if err == nil {
+					t.Fatalf("no error, want one mentioning %q", c.wantErr)
+				}
+				if !strings.Contains(err.Error(), c.wantErr) {
+					t.Errorf("error = %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Active.Label != c.wantActive || got.Idle.Label != c.wantIdle {
+				t.Errorf("active/idle = %s/%s, want %s/%s",
+					got.Active.Label, got.Idle.Label, c.wantActive, c.wantIdle)
+			}
+			if got.Idle.Revision != c.wantIdleRev {
+				t.Errorf("idle revision = %q, want %q", got.Idle.Revision, c.wantIdleRev)
+			}
+			if got.PinNeeded != c.wantPinNeeded {
+				t.Errorf("pinNeeded = %v, want %v", got.PinNeeded, c.wantPinNeeded)
+			}
+		})
+	}
+}
+
+// A tag cannot point at nothing, so the first release writes one entry rather
+// than one entry and an empty one.
+func TestWeightsLeavesOutASideWithNoRevision(t *testing.T) {
+	got := weights(
+		trafficEntry{target.Side{Label: "blue", Revision: "site-00001"}, weightAll},
+		trafficEntry{target.Side{Label: "green"}, weightNone},
+	)
+	if len(got) != 1 || got[0].GetTag() != "blue" {
+		t.Fatalf("weights = %v", got)
+	}
+}
+
+// Every entry this tool writes names a revision. LATEST would hand the next
+// revision everything the moment it is created, which is the one thing staging
+// has to prevent.
+func TestWeightsAlwaysPin(t *testing.T) {
+	for _, w := range weights(
+		trafficEntry{target.Side{Label: "blue", Revision: "site-00001"}, weightAll},
+		trafficEntry{target.Side{Label: "green", Revision: "site-00002"}, weightNone},
+	) {
+		if w.GetType() != runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION {
+			t.Errorf("%s is %s, want an explicit revision", w.GetTag(), w.GetType())
+		}
+	}
+}
+
+func TestPointTraffic(t *testing.T) {
+	got, err := pointTraffic([]*runpb.TrafficTarget{
+		ttLatest("green", 100),
+		tt("blue", "site-00001", 0),
+	}, "blue")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, w := range got {
+		want := int32(0)
+		if w.GetTag() == "blue" {
+			want = 100
+		}
+		if w.GetPercent() != want {
+			t.Errorf("%s = %d%%, want %d%%", w.GetTag(), w.GetPercent(), want)
+		}
+		// Unpinned on the way out: "whatever is newest" cannot be a resting
+		// state for either side.
+		if w.GetType() != runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION {
+			t.Errorf("%s is still %s", w.GetTag(), w.GetType())
+		}
+	}
+
+	if _, err := pointTraffic([]*runpb.TrafficTarget{tt("blue", "site-00001", 100)}, "green"); err == nil {
+		t.Error("pointing at a tag that does not exist should fail")
+	}
+}
+
+// The Cloud Run cleanup is the traffic block itself: there is nothing to switch
+// off, but a stray tag is a URL that answers, pointing at a version nobody
+// chose.
+func TestTidyTraffic(t *testing.T) {
+	next, dropped := tidyTraffic([]*runpb.TrafficTarget{
+		tt("blue", "site-00001", 0),
+		tt("green", "site-00002", 100),
+		tt("leftover", "site-00000", 0),
+	}, labels)
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1", dropped)
+	}
+	if len(next) != 2 {
+		t.Fatalf("next = %v, want the two sides", next)
+	}
+
+	// Nothing to do is not the same as something to write.
+	if _, dropped := tidyTraffic([]*runpb.TrafficTarget{
+		tt("blue", "site-00001", 0),
+		tt("green", "site-00002", 100),
+	}, labels); dropped != 0 {
+		t.Errorf("dropped = %d on a block that was already tidy", dropped)
+	}
+
+	// A split is refused rather than guessed at.
+	if next, _ := tidyTraffic([]*runpb.TrafficTarget{
+		tt("blue", "site-00001", 50),
+		tt("green", "site-00002", 50),
+	}, labels); next != nil {
+		t.Error("a split has no single serving entry to tidy around")
+	}
+}
+
+// Cloud Run returns a revision as a bare name in one place and as a resource
+// path in another. A traffic block is written with the bare name.
+func TestShortRevision(t *testing.T) {
+	const want = "site-00007-abc"
+	if got := shortRevision(
+		"projects/p/locations/europe-west4/services/site/revisions/" + want); got != want {
+		t.Errorf("short = %q", got)
+	}
+	if got := shortRevision(want); got != want {
+		t.Errorf("a bare name should come back unchanged, got %q", got)
+	}
+}
+
+// The tagged address comes from the API rather than being assembled, which is
+// the one place Cloud Run is kinder than Container Apps.
+func TestTaggedURL(t *testing.T) {
+	statuses := []*runpb.TrafficTargetStatus{
+		{Tag: "blue", Uri: "https://blue---site-abc.a.run.app"},
+		{Tag: "green", Uri: "https://green---site-abc.a.run.app"},
+	}
+	if got := taggedURL(statuses, "green"); got != "https://green---site-abc.a.run.app" {
+		t.Errorf("url = %q", got)
+	}
+	if got := taggedURL(statuses, "purple"); got != "" {
+		t.Errorf("an unknown tag has no address, got %q", got)
+	}
+}
+
+// The side is written into the container and then excluded from the diff. Both
+// halves matter: without the write a service cannot address its own downstream,
+// and without the exclusion every run would report a change and deploy forever.
+func TestSideIsWrittenButNotCompared(t *testing.T) {
+	current := template("", &runpb.Container{
+		Name:  "app",
+		Image: "eu.gcr.io/p/site:v1",
+		Env: []*runpb.EnvVar{
+			literal(target.SideEnvVar, "blue"),
+			literal("KEEP", "yes"),
+		},
+	})
+
+	next := withSide(current, "app", "green", nil, nil)
+
+	env := envOf(next, "app")
+	if env[target.SideEnvVar] != "=green" {
+		t.Errorf("the side was not written: %v", env)
+	}
+	if env["KEEP"] != "=yes" {
+		t.Errorf("an unrelated variable was lost: %v", env)
+	}
+
+	added, changed, removed := diffEnv(current, next, "app", nil)
+	if len(added)+len(changed)+len(removed) != 0 {
+		t.Errorf("the side produced a diff: +%v ~%v -%v", added, changed, removed)
+	}
+}
+
+// The staged containers are copied from the *other* side's revision, so a
+// variable this side does not set would arrive carrying the other side's value.
+func TestSideEnvReplacesTheOtherSidesValues(t *testing.T) {
+	current := template("", &runpb.Container{
+		Name:  "app",
+		Image: "eu.gcr.io/p/site:v1",
+		Env:   []*runpb.EnvVar{literal("ROUTER_URL", "https://blue.example")},
+	})
+
+	managed := []string{"ROUTER_URL"}
+	next := withSide(current, "app", "green", []target.EnvVar{
+		{Name: "ROUTER_URL", Value: refs.Value{Kind: refs.Literal, Literal: "https://green.example"}},
+	}, managed)
+
+	if got := envOf(next, "app")["ROUTER_URL"]; got != "=https://green.example" {
+		t.Errorf("ROUTER_URL = %q, want the green value", got)
+	}
+
+	// And it is invisible to the diff, because a value that differs by side by
+	// definition is not a change anyone made.
+	added, changed, removed := diffEnv(current, next, "app", managed)
+	if len(added)+len(changed)+len(removed) != 0 {
+		t.Errorf("the side environment produced a diff: +%v ~%v -%v", added, changed, removed)
+	}
+}
+
+// Sidecars are Terraform's. A collector next to the app keeps its own image and
+// does not get the side written into it.
+func TestWithSideLeavesSidecarsAlone(t *testing.T) {
+	current := template("",
+		&runpb.Container{Name: "app", Image: "eu.gcr.io/p/site:v1"},
+		&runpb.Container{Name: "collector", Image: "otel/collector:1"},
+	)
+
+	next := withSide(current, "app", "green", nil, nil)
+
+	if _, ok := envOf(next, "collector")[target.SideEnvVar]; ok {
+		t.Error("the sidecar was told which side it is on")
+	}
+	if envOf(next, "app")[target.SideEnvVar] != "=green" {
+		t.Error("the application container was not")
+	}
+}
+
+// envOf reads the environment as written. Deliberately not envFingerprint,
+// which hides exactly the variables these tests are about.
+func envOf(tmpl *runpb.RevisionTemplate, container string) map[string]string {
+	out := map[string]string{}
+	for _, e := range findContainer(tmpl.GetContainers(), container).GetEnv() {
+		if src := e.GetValueSource().GetSecretKeyRef(); src != nil {
+			out[e.GetName()] = "->" + src.GetSecret()
+			continue
+		}
+		out[e.GetName()] = "=" + e.GetValue()
+	}
+	return out
+}
