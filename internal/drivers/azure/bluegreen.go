@@ -31,9 +31,9 @@ const (
 
 // bgPayload is what a blue-green change carries from Plan to Apply.
 type bgPayload struct {
-	// containers is the template for the new revision, built from the template
-	// of the revision that is *serving* rather than from the app's own — see
-	// planAppBlueGreen.
+	// containers is the template for the new revision, built from the app's own
+	// template so that what Terraform declares in the container reaches the
+	// release — see planAppBlueGreen.
 	containers []*armappcontainers.Container
 
 	// fqdn is the app's ingress hostname, which the label URL is derived from.
@@ -282,10 +282,8 @@ func (d *Driver) getApp(ctx context.Context, name string) (*armappcontainers.Con
 //
 // This is the read that makes blue-green correct rather than nearly correct.
 // With two live revisions the app's template is whichever was created last —
-// after a failed deploy, the one that was abandoned. Building on that would
-// leak a failed attempt's environment into the next release, and comparing
-// against it would report "already up to date" for a version that never
-// shipped.
+// after a failed deploy, the one that was abandoned. Comparing against that
+// would report "already up to date" for a version that never shipped.
 func (d *Driver) revisionTemplate(
 	ctx context.Context,
 	app, revision string,

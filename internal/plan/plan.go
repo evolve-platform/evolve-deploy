@@ -73,11 +73,11 @@ func (c *ServicePlan) BlueGreen() bool { return c.Side != "" }
 // EnvRemovals lists every environment variable this plan would delete, as
 // "target: NAME".
 //
-// Declaring an environment in the config means owning all of it, and the first
-// time someone does that for a service Terraform has been filling, the natural
-// mistake is to list the one variable they care about — which asks the tool to
-// drop the other thirty, secrets included. That is a service that stops
-// starting, so apply refuses unless it is confirmed.
+// The config cannot cause one: it lays its variables over what is already there
+// and never removes. So a removal means the variable is gone from what Terraform
+// declares, and the next release is what carries that into a running service —
+// which is worth confirming, secrets being among the things that disappear this
+// way.
 func (p *Plan) EnvRemovals() []string {
 	var out []string
 	for _, cp := range p.Services {

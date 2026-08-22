@@ -48,7 +48,7 @@ func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	next, from, err := nextContainers(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextContainers(current, name, want.Version, want.Env)
 	if err != nil {
 		return nil, err
 	}

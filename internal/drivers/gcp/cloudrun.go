@@ -53,7 +53,7 @@ func (d *Driver) planService(ctx context.Context, want *target.Desired) (*target
 		return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 	}
 
-	next, from, err := nextTemplate(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextTemplate(current, name, want.Version, want.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +154,6 @@ func nextTemplate(
 	current *runpb.RevisionTemplate,
 	name, version string,
 	env []target.EnvVar,
-	manageEnv bool,
 ) (next *runpb.RevisionTemplate, from string, err error) {
 	next = proto.Clone(current).(*runpb.RevisionTemplate)
 
@@ -173,15 +172,60 @@ func nextTemplate(
 		}
 		from = image.Tag(c.GetImage())
 		c.Image = img
-		if manageEnv {
-			c.Env = renderEnv(env)
-		}
+		c.Env = mergeEnv(c.GetEnv(), renderEnv(env))
 		found = true
 	}
 	if !found {
 		return nil, "", fmt.Errorf("container %q disappeared while building the revision", name)
 	}
 	return next, from, nil
+}
+
+// mergeEnv lays the config's variables over the ones the revision already has.
+//
+// Terraform declares the environment and the deploy config refines it, so a name
+// the config does not mention keeps the value it was given, and there is no flag
+// for "the config said nothing": merging an empty set is already that no-op.
+//
+// The order follows the base and an unknown name is appended, so a release that
+// changes nothing produces an identical template. The trade is that the config
+// can set a variable but never remove one — removal belongs where the
+// declaration is.
+func mergeEnv(base, over []*runpb.EnvVar) []*runpb.EnvVar {
+	if len(over) == 0 {
+		return base
+	}
+
+	byName := make(map[string]*runpb.EnvVar, len(over))
+	appended := make([]string, 0, len(over))
+	for _, e := range over {
+		if e == nil {
+			continue
+		}
+		if _, seen := byName[e.GetName()]; !seen {
+			appended = append(appended, e.GetName())
+		}
+		byName[e.GetName()] = e
+	}
+
+	out := make([]*runpb.EnvVar, 0, len(base)+len(over))
+	for _, e := range base {
+		if e == nil {
+			continue
+		}
+		if o, ok := byName[e.GetName()]; ok {
+			out = append(out, o)
+			delete(byName, e.GetName())
+			continue
+		}
+		out = append(out, e)
+	}
+	for _, n := range appended {
+		if o, ok := byName[n]; ok {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 // renderEnv turns the planned environment into Cloud Run variables. A reference

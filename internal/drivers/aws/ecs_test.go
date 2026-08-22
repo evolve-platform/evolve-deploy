@@ -135,3 +135,91 @@ func TestDiffEnvComparesReferencesByTarget(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeEnvKeepsWhatTheConfigDoesNotMention(t *testing.T) {
+	// Terraform declares the environment on the base task definition and the
+	// config refines it, so a name the config is silent about survives.
+	lits, secs := mergeEnv(
+		[]ecstypes.KeyValuePair{
+			{Name: awssdk.String("LOG_LEVEL"), Value: awssdk.String("info")},
+			{Name: awssdk.String("CTP_PROJECT_KEY"), Value: awssdk.String("evolve-tst")},
+		},
+		[]ecstypes.Secret{
+			{Name: awssdk.String("MOLLIE_API_KEY"), ValueFrom: awssdk.String("arn:mollie")},
+		},
+		[]target.EnvVar{
+			{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
+			{Name: "FEATURE_QUOTES", Value: refs.Value{Kind: refs.Literal, Literal: "on"}},
+		},
+	)
+
+	want := map[string]string{"LOG_LEVEL": "debug", "CTP_PROJECT_KEY": "evolve-tst", "FEATURE_QUOTES": "on"}
+	if got := literalMap(lits); !reflect.DeepEqual(got, want) {
+		t.Errorf("literals = %v, want %v", got, want)
+	}
+	if got := secretMap(secs); !reflect.DeepEqual(got, map[string]string{"MOLLIE_API_KEY": "arn:mollie"}) {
+		t.Errorf("secrets = %v, want them untouched", got)
+	}
+}
+
+func TestMergeEnvMovesANameBetweenTheTwoLists(t *testing.T) {
+	// ECS keeps literals and references apart and a name may be in only one of
+	// them. A config that turns a literal into a reference has to take it out of
+	// the list it was in, or the task definition declares the same name twice.
+	lits, secs := mergeEnv(
+		[]ecstypes.KeyValuePair{
+			{Name: awssdk.String("LOG_LEVEL"), Value: awssdk.String("info")},
+			{Name: awssdk.String("CTP_CLIENT_SECRET"), Value: awssdk.String("plaintext")},
+		},
+		[]ecstypes.Secret{
+			{Name: awssdk.String("MOLLIE_API_KEY"), ValueFrom: awssdk.String("arn:mollie")},
+		},
+		[]target.EnvVar{
+			{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "arn:ctp"}},
+		},
+	)
+
+	if got := literalMap(lits); !reflect.DeepEqual(got, map[string]string{"LOG_LEVEL": "info"}) {
+		t.Errorf("literals = %v, want the one that became a reference taken out", got)
+	}
+	want := map[string]string{"MOLLIE_API_KEY": "arn:mollie", "CTP_CLIENT_SECRET": "arn:ctp"}
+	if got := secretMap(secs); !reflect.DeepEqual(got, want) {
+		t.Errorf("secrets = %v, want %v", got, want)
+	}
+}
+
+func TestMergeEnvMovesANameBackToALiteral(t *testing.T) {
+	// The mirror of the move above, which is a separate branch: a reference the
+	// config redeclares as a literal has to leave the secrets list.
+	lits, secs := mergeEnv(
+		[]ecstypes.KeyValuePair{{Name: awssdk.String("LOG_LEVEL"), Value: awssdk.String("info")}},
+		[]ecstypes.Secret{{Name: awssdk.String("CTP_CLIENT_SECRET"), ValueFrom: awssdk.String("arn:ctp")}},
+		[]target.EnvVar{
+			{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Literal, Literal: "plaintext"}},
+		},
+	)
+
+	want := map[string]string{"LOG_LEVEL": "info", "CTP_CLIENT_SECRET": "plaintext"}
+	if got := literalMap(lits); !reflect.DeepEqual(got, want) {
+		t.Errorf("literals = %v, want %v", got, want)
+	}
+	if len(secs) != 0 {
+		t.Errorf("secrets = %v, want the name gone from there", secretMap(secs))
+	}
+}
+
+func literalMap(lits []ecstypes.KeyValuePair) map[string]string {
+	out := make(map[string]string, len(lits))
+	for _, kv := range lits {
+		out[awssdk.ToString(kv.Name)] = awssdk.ToString(kv.Value)
+	}
+	return out
+}
+
+func secretMap(secs []ecstypes.Secret) map[string]string {
+	out := make(map[string]string, len(secs))
+	for _, s := range secs {
+		out[awssdk.ToString(s.Name)] = awssdk.ToString(s.ValueFrom)
+	}
+	return out
+}

@@ -676,7 +676,7 @@ func (d *Driver) planServiceBlueGreen(
 		return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 	}
 
-	next, from, err := nextTemplate(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextTemplate(current, name, want.Version, want.Env)
 	if err != nil {
 		return nil, err
 	}

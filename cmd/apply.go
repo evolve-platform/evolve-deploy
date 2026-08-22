@@ -57,9 +57,8 @@ release deployed.`,
 			fmt.Fprintf(out, "\nWould delete %d environment variable(s):\n  - %s\n\n",
 				len(removals), strings.Join(removals, "\n  - "))
 			fmt.Fprint(out,
-				"Declaring `env:` for a service means owning all of it, so anything not\n"+
-					"listed there is removed. If the variables above come from Terraform, add\n"+
-					"them to the config or leave `env:` out entirely.\n\n")
+				"The deploy config only ever sets variables, so these are gone from what\n"+
+					"Terraform declares. Put them back there if that was not intended.\n\n")
 			return fmt.Errorf(
 				"refusing to delete %d environment variable(s); pass --allow-env-removal if you meant it",
 				len(removals))

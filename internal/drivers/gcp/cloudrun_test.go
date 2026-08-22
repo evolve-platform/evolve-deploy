@@ -45,7 +45,7 @@ func TestTheUnnamedContainerIsFound(t *testing.T) {
 
 	next, from, err := nextTemplate(current, name, "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestRevisionNameIsCleared(t *testing.T) {
 	// makes Cloud Run reject the update.
 	current := template("purchase-00007-abc", &runpb.Container{Image: "repo/purchase:old"})
 
-	next, _, err := nextTemplate(current, "", "abc1234", nil, true)
+	next, _, err := nextTemplate(current, "", "abc1234", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 
 	next, _, err := nextTemplate(current, "app", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

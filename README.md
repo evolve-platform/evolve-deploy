@@ -129,7 +129,8 @@ where it points would not be.
 ### Image only
 
 Leave `env` and `envFrom` out, and the tool sets the image tag and touches
-nothing else. Every environment variable stays exactly as Terraform left it.
+nothing else. Every environment variable stays exactly as Terraform left it —
+which needs no mode of its own, since a config that sets nothing merges nothing.
 This is the whole file:
 
 ```yaml
@@ -147,10 +148,14 @@ services:
 
 ### Environment under deploy control
 
-Declare `env`, and the tool owns the whole environment for that service:
-anything not listed is removed. That is the point — it is what makes removing a
-variable possible — but it means listing all of them, not just the interesting
-ones.
+Declare `env`, and those variables are laid over the ones the target already
+carries. Terraform declares the environment; the config refines it. So listing
+one variable sets one variable, and the other thirty keep the values Terraform
+gave them.
+
+The trade is that the config sets but never removes. Deleting a variable means
+deleting it where it is declared, which is Terraform — the next release then
+carries that through.
 
 ```yaml
 services:
@@ -164,9 +169,9 @@ services:
       - { type: container-app, name: evolve-tst-purchase }
 ```
 
-`apply` refuses when it would delete a variable the config does not mention,
-which is what stops "I added one variable" from becoming "I deleted the other
-thirty-one, secrets included":
+A variable can still disappear — when Terraform stops declaring one that a
+running target has. `apply` refuses to be the release that carries that through
+unless it is confirmed, secrets being among the things that go this way:
 
 ```console
 $ evolve-deploy apply deploy/tst.yaml
@@ -175,9 +180,9 @@ error: this would delete 3 environment variable(s):
   - container-app/evolve-tst-purchase: OTEL_EXPORTER_OTLP_HEADERS
   - container-app/evolve-tst-purchase: SENTRY_DSN
 
-Declaring `env:` for a service means owning all of it, so anything not listed
-there is removed. If the variables above come from Terraform, add them to the
-config or leave `env:` out entirely. Pass --allow-env-removal if you meant it.
+The deploy config only ever sets variables, so these are gone from what
+Terraform declares. Put them back there if that was not intended.
+Pass --allow-env-removal if you meant it.
 ```
 
 ## References
@@ -252,7 +257,12 @@ let you manage the storage account are not enough to read from it.
 `envFrom` expands a JSON object into the environment — what Terraform writes
 with `jsonencode(local.env_vars)`. It must point at a parameter store, never a
 secret store, so bulk expansion never means reading a secret. Anything in `env`
-wins over it.
+wins over it, and both are laid over what the target already carries.
+
+So the environment a target ends up with is four layers, each with the last
+word over the one before it: what Terraform declares, then `envFrom`, then
+`env`, then a blue-green service's `strategy.env` for the side being staged —
+plus `EVOLVE_DEPLOY_SIDE`, which the tool writes itself.
 
 ## Hooks
 

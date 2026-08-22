@@ -389,12 +389,13 @@ type Target struct {
 	// ManagesEnv records whether the config said anything about environment
 	// variables at all.
 	//
-	// It is the difference between "leave the environment alone" and "the
-	// environment is now empty". A config with no env and no envFrom is the
-	// image-only mode: Terraform owns every variable and the deploy must not
-	// touch them. Deriving this from the merged map would not work — a config
-	// that declares nothing and one that declares nothing useful both end up
-	// with an empty map.
+	// The container drivers no longer need it: they lay the config's variables
+	// over the ones already there, and merging an empty set is the no-op that an
+	// image-only deploy wants. What still needs it is the refusal on a function
+	// app, whose app settings hold platform wiring this tool will not own — and
+	// that has to fire on a config that declares an environment, not on one whose
+	// environment happens to resolve to nothing. Deriving it from the merged map
+	// would not tell those apart.
 	ManagesEnv bool `yaml:"-"`
 }
 

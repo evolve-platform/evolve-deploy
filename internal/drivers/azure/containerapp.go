@@ -108,7 +108,7 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	next, from, err := nextContainers(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextContainers(current, name, want.Version, want.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +423,6 @@ func nextContainers(
 	current []*armappcontainers.Container,
 	name, version string,
 	env []target.EnvVar,
-	manageEnv bool,
 ) (next []*armappcontainers.Container, from string, err error) {
 	next = make([]*armappcontainers.Container, 0, len(current))
 	for _, c := range current {
@@ -444,9 +443,7 @@ func nextContainers(
 
 		replaced := *c
 		replaced.Image = to.Ptr(img)
-		if manageEnv {
-			replaced.Env = renderEnv(env)
-		}
+		replaced.Env = mergeEnv(c.Env, renderEnv(env))
 		next = append(next, &replaced)
 	}
 
@@ -521,13 +518,11 @@ func parseJSONMap(where, raw string) (map[string]string, error) {
 // planAppBlueGreen works out the next revision of a Container App that is
 // deployed a side at a time.
 //
-// It differs from planApp in one place that matters more than it looks: the
-// template it reads, compares against and builds on is the one belonging to the
-// revision that is *serving*, not the app's own. With two live revisions the
-// app's template is whichever was created last — which after a failed deploy is
-// the revision that was abandoned. Reading that would make the retry after a
-// failed smoke test report "already up to date", and would carry the failed
-// attempt's environment into the next release.
+// It differs from planApp in reading two templates where planApp reads one: the
+// app's own to build on, and the serving revision's to compare against. Which
+// one is used where is the whole of this function, and swapping them costs
+// either Terraform's ownership of the container or the ability to retry a
+// release whose gate failed.
 func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*target.Change, error) {
 	t := want.Target
 
@@ -540,23 +535,32 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 		return nil, err
 	}
 
-	// Only fall back to the app's own template when no side is serving yet,
-	// which is an app that has never been deployed.
-	current := app.Properties.Template.Containers
+	// The revision is built on the app's own template, because Terraform owns
+	// everything in the container except the tag. A probe, a cpu bump or an
+	// environment variable it declares has to reach the next release; building on
+	// the serving revision instead stages over it every release, so the change is
+	// reverted rather than delayed and Terraform never owns what it declares.
+	//
+	// It is compared against the revision that is serving, because with two live
+	// revisions the app's template is whichever was created last — after a failed
+	// deploy, the attempt that was abandoned. Comparing against that would report
+	// the retry as already up to date.
+	base := app.Properties.Template.Containers
+	serving := base
 	if sides.Active.Revision != "" {
 		tmpl, err := d.revisionTemplate(ctx, t.Name, sides.Active.Revision)
 		if err != nil {
 			return nil, fmt.Errorf("container app %s: %w", t.Name, err)
 		}
-		current = tmpl.Containers
+		serving = tmpl.Containers
 	}
 
-	name, err := target.PickContainer(containerNames(current), t.Container, appContainer)
+	name, err := target.PickContainer(containerNames(base), t.Container, appContainer)
 	if err != nil {
 		return nil, fmt.Errorf("container app %s: %w", t.Name, err)
 	}
 	slog.Debug("container chosen", "app", t.Name, "container", name,
-		"of", strings.Join(containerNames(current), ","))
+		"of", strings.Join(containerNames(base), ","))
 
 	var declared []*armappcontainers.Secret
 	if app.Properties.Configuration != nil {
@@ -566,9 +570,16 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 		return nil, err
 	}
 
-	next, from, err := nextContainers(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextContainers(base, name, want.Version, want.Env)
 	if err != nil {
 		return nil, err
+	}
+	// The tag the base carries is the last one written, which after a failed
+	// deploy names a release that never took traffic. What is live is the tag on
+	// the serving revision — and an app that has never been deployed has neither,
+	// so the base's tag stands in.
+	if sides.Active.Version != "" {
+		from = sides.Active.Version
 	}
 	// The side goes in last, and after the diff is taken it is invisible — see
 	// envFingerprint. It alternates every release, so comparing it would report
@@ -581,7 +592,7 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 	managed := t.Strategy.SideEnvNames()
 	next = withSide(next, name, sides.Idle.Label, sideEnv, managed)
 
-	added, changed, removed := diffContainers(current, next, name, managed)
+	added, changed, removed := diffContainers(serving, next, name, managed)
 
 	// Nothing changed here, but the side still needs a revision of its own: the
 	// staged side is only a stack if every app is on it, and a revision can hold
@@ -607,6 +618,60 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 		Carry:       carry,
 		Payload:     &bgPayload{containers: next, fqdn: fqdn},
 	}, nil
+}
+
+// mergeEnv lays the config's variables over the ones the container already has.
+//
+// Terraform declares the environment and the deploy config refines it, so a name
+// the config does not mention keeps the value it was given. This is why there is
+// no flag for "the config said nothing": merging an empty set is already the
+// no-op that case wants.
+//
+// The order follows the base and a name the base does not carry is appended, so
+// a release that changes nothing writes an identical list — which matters,
+// because a template that differs is a revision ARM has to create.
+//
+// The trade is that the config can set a variable but never remove one. That is
+// deliberate: removal belongs where the declaration is.
+func mergeEnv(
+	base, over []*armappcontainers.EnvironmentVar,
+) []*armappcontainers.EnvironmentVar {
+	if len(over) == 0 {
+		return base
+	}
+
+	byName := make(map[string]*armappcontainers.EnvironmentVar, len(over))
+	appended := make([]string, 0, len(over))
+	for _, e := range over {
+		if e == nil {
+			continue
+		}
+		n := derefString(e.Name)
+		if _, seen := byName[n]; !seen {
+			appended = append(appended, n)
+		}
+		byName[n] = e
+	}
+
+	out := make([]*armappcontainers.EnvironmentVar, 0, len(base)+len(over))
+	for _, e := range base {
+		if e == nil {
+			continue
+		}
+		n := derefString(e.Name)
+		if o, ok := byName[n]; ok {
+			out = append(out, o)
+			delete(byName, n)
+			continue
+		}
+		out = append(out, e)
+	}
+	for _, n := range appended {
+		if o, ok := byName[n]; ok {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 // withSide writes the side, and the side's own variables, into the application

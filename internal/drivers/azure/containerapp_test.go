@@ -41,7 +41,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 
 	next, from, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestDiffContainersIgnoresSidecarsAndRotations(t *testing.T) {
 
 func TestNextContainersRefusesAnUntaggedImage(t *testing.T) {
 	_, _, err := nextContainers(
-		[]*armappcontainers.Container{container("main", "")}, "main", "abc", nil, true)
+		[]*armappcontainers.Container{container("main", "")}, "main", "abc", nil)
 	if err == nil {
 		t.Fatal("an image with no repository was accepted")
 	}
@@ -167,7 +167,7 @@ func TestAnAbsentEnvConfigLeavesTheEnvironmentAlone(t *testing.T) {
 			secretRef("CTP_CLIENT_SECRET", "ctp-client-secret")),
 	}
 
-	next, _, err := nextContainers(current, "main", "abc1234", nil, false)
+	next, _, err := nextContainers(current, "main", "abc1234", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,5 +324,114 @@ func TestAHealthyRevisionHasNothingToDescribe(t *testing.T) {
 	})
 	if detail != "" || crashing {
 		t.Errorf("a healthy revision produced %q (crashing=%v)", detail, crashing)
+	}
+}
+
+func TestConfigVariablesLayOverTerraformsRatherThanReplacingThem(t *testing.T) {
+	// Terraform declares the environment and the config refines it. A name the
+	// config does not mention keeps the value Terraform gave it — replacing the
+	// list instead would strip everything the config does not repeat, which is
+	// most of it.
+	current := []*armappcontainers.Container{
+		container("main", "reg/purchase:old",
+			literal("LOG_LEVEL", "info"),
+			literal("CTP_PROJECT_KEY", "evolve-tst"),
+			secretRef("CTP_CLIENT_SECRET", "ctp-client-secret")),
+	}
+
+	next, _, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
+		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
+		{Name: "FEATURE_QUOTES", Value: refs.Value{Kind: refs.Literal, Literal: "on"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := envFingerprint(findContainer(next, "main").Env, nil)
+	want := map[string]string{
+		"LOG_LEVEL":         "=debug",
+		"CTP_PROJECT_KEY":   "=evolve-tst",
+		"CTP_CLIENT_SECRET": "->ctp-client-secret",
+		"FEATURE_QUOTES":    "=on",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("environment = %v, want %v", got, want)
+	}
+}
+
+func TestAVariableThatChangesKindLeavesNothingBehind(t *testing.T) {
+	// A literal that becomes a reference is the same name twice if the merge
+	// appends instead of replacing, and Container Apps then resolves whichever
+	// comes last — a value decided by an ordering nobody declared.
+	current := []*armappcontainers.Container{
+		container("main", "reg/purchase:old", literal("CTP_CLIENT_SECRET", "plaintext")),
+	}
+
+	next, _, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
+		{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "ctp-client-secret"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := findContainer(next, "main").Env
+	if len(env) != 1 {
+		t.Fatalf("environment has %d variables, want the one it started with", len(env))
+	}
+	if got := derefString(env[0].SecretRef); got != "ctp-client-secret" {
+		t.Errorf("secretRef = %q", got)
+	}
+	if env[0].Value != nil {
+		t.Error("the literal value survived alongside the reference")
+	}
+}
+
+func TestTheConfigCannotRemoveAVariable(t *testing.T) {
+	// The other half of merging, written down: dropping a name from the deploy
+	// config leaves it where it was. Removal belongs where the declaration is,
+	// and a config that could delete would delete everything Terraform set and
+	// the config never mentioned.
+	current := []*armappcontainers.Container{
+		container("main", "reg/purchase:old", literal("LOG_LEVEL", "info")),
+	}
+
+	next, _, err := nextContainers(current, "main", "abc1234", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := envFingerprint(findContainer(next, "main").Env, nil)["LOG_LEVEL"]; got != "=info" {
+		t.Errorf("LOG_LEVEL = %q, want it left alone", got)
+	}
+}
+
+func TestMergingTheSameConfigTwiceWritesTheSameList(t *testing.T) {
+	// A template that differs is a revision ARM has to create, so the order has
+	// to come from the base and the config rather than from map iteration.
+	base := []*armappcontainers.EnvironmentVar{
+		literal("A", "1"), literal("B", "2"), secretRef("C", "c"),
+	}
+	over := renderEnv([]target.EnvVar{
+		{Name: "B", Value: refs.Value{Kind: refs.Literal, Literal: "two"}},
+		{Name: "Z", Value: refs.Value{Kind: refs.Literal, Literal: "z"}},
+		{Name: "Y", Value: refs.Value{Kind: refs.Literal, Literal: "y"}},
+	})
+
+	var first []string
+	for i := 0; i < 5; i++ {
+		got := mergeEnv(base, over)
+		names := make([]string, 0, len(got))
+		for _, e := range got {
+			names = append(names, derefString(e.Name))
+		}
+		if first == nil {
+			first = names
+			continue
+		}
+		if !reflect.DeepEqual(names, first) {
+			t.Fatalf("order changed between runs: %v then %v", first, names)
+		}
+	}
+	if want := []string{"A", "B", "C", "Z", "Y"}; !reflect.DeepEqual(first, want) {
+		t.Errorf("names = %v, want %v", first, want)
 	}
 }

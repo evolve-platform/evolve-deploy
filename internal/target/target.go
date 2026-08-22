@@ -47,17 +47,19 @@ type Desired struct {
 	Target  *config.Target
 	Env     []EnvVar
 
-	// ManageEnv is false when the config says nothing about environment
-	// variables, and the driver must then leave the running environment exactly
-	// as it found it. Writing an empty list instead would delete everything
-	// Terraform put there — which is the opposite of what a config that
-	// mentions no variables is asking for.
+	// ManageEnv reports whether the config declared an environment at all.
+	//
+	// It is not what decides whether Env is written: the container drivers merge
+	// it over what the container already carries, so a config that declares
+	// nothing changes nothing without being asked. It is here for the drivers
+	// that cannot honour an environment at all and have to refuse one — a
+	// function app, whose settings are half platform wiring.
 	ManageEnv bool
 
 	// SideEnv is the resolved per-side environment, keyed by label. Written on
-	// the staged side regardless of ManageEnv: these variables are how a side
-	// addresses its own downstream, so they are added to the environment rather
-	// than replacing it.
+	// the staged side last of all, over both what Terraform declared and what the
+	// config set: these variables are how a side addresses its own downstream, so
+	// the side has the final say on them.
 	SideEnv map[string][]EnvVar
 }
 
