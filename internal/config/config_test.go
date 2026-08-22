@@ -156,6 +156,37 @@ services:
 	}
 }
 
+func TestHooksTakeEitherForm(t *testing.T) {
+	// The plain string is what every config in existence is written in, and it
+	// has to go on meaning the same thing next to the named actions.
+	f, err := load(t, awsHeader+`
+services:
+  site:
+    version: abc1234
+    type: ecs
+    cluster: c
+    before:
+      - hive schema:check --commit {{.version}}
+      - cmd: echo explicit
+    after:
+      - {uses: honeycomb, with: {dataset: site}}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := f.Services["site"]
+	if len(c.Before) != 2 || len(c.After) != 1 {
+		t.Fatalf("got %d before and %d after", len(c.Before), len(c.After))
+	}
+	if got, want := c.Before[0].Describe(), "hive schema:check --commit {{.version}}"; got != want {
+		t.Errorf("first hook = %q, want %q", got, want)
+	}
+	if got := c.After[0].Describe(); !strings.Contains(got, "honeycomb marker on site") {
+		t.Errorf("the action does not describe itself: %q", got)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	tests := []struct {
 		name string
@@ -166,6 +197,45 @@ func TestValidation(t *testing.T) {
 			name: "unknown key is a typo, not something to ignore",
 			body: awsHeader + "services:\n  site:\n    version: a\n    type: ecs\n    cluster: c\n    clsuter: c\n",
 			want: "field clsuter not found",
+		},
+		{
+			name: "a hook mistake names the entry it is in",
+			body: awsHeader + `services:
+  site:
+    version: a
+    type: ecs
+    cluster: c
+    after:
+      - echo fine
+      - {uses: honycomb, with: {dataset: site}}
+`,
+			want: `services.site.after[1]: line 13: uses: "honycomb" is not one of honeycomb, http, sentry`,
+		},
+		{
+			name: "an option the action does not have",
+			body: awsHeader + `services:
+  site:
+    version: a
+    type: ecs
+    cluster: c
+    after:
+      - {uses: honeycomb, with: {dataset: site, mesage: hi}}
+`,
+			want: "services.site.after[0]: line 12: with: no such option: mesage",
+		},
+		{
+			name: "a smoke entry is checked the same way",
+			body: awsHeader + `strategy:
+  type: blue-green
+  smoke:
+    - {uses: http, with: {retry: 3}}
+services:
+  site:
+    version: a
+    targets:
+      - { type: ecs, name: site, cluster: c, test_url: https://site.test }
+`,
+			want: "strategy.smoke[0]: line 9: http: `url` is required",
 		},
 		{
 			name: "type must belong to the cloud",

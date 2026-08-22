@@ -70,7 +70,6 @@ release deployed.`,
 			Out:         out,
 			Concurrency: flagWorkers,
 			Width:       ui.Width(p),
-			Vars:        vars,
 		})
 	},
 }

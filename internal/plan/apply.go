@@ -39,8 +39,6 @@ type Options struct {
 	Concurrency int
 	// Width aligns progress lines with the plan printed above them.
 	Width int
-	// Vars are the --var values, available to every hook.
-	Vars map[string]string
 }
 
 // Apply executes a plan.
@@ -578,8 +576,8 @@ func smokeRelease(
 	staged map[*target.Change]*target.Staged,
 	o Options,
 ) []string {
-	commands := p.SmokeCommands()
-	if len(commands) == 0 {
+	smoke := p.SmokeHooks()
+	if len(smoke) == 0 {
 		return nil
 	}
 
@@ -587,7 +585,7 @@ func smokeRelease(
 	started := time.Now()
 
 	if err := o.Hooks.RunWith(
-		ctx, releaseNode, "smoke", commands, p.SmokeVars(), funcs); err != nil {
+		ctx, releaseNode, "smoke", smoke, p.SmokeVars(), funcs); err != nil {
 		fmt.Fprintf(o.Out, "  %-*s smoke failed after %s, no traffic was moved\n",
 			o.Width, releaseNode, time.Since(started).Round(time.Second))
 		return []string{err.Error()}

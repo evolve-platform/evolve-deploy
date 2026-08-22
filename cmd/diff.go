@@ -53,13 +53,21 @@ definition rather than by anything in this file.`,
 			if !cp.HasWork() {
 				continue
 			}
-			vars := hooks.Vars{
-				"version": cp.Service.Version,
-				"name":    cp.Service.Name,
-				"env":     cp.Env,
+			// The variables the hook will actually be given. Built by hand
+			// here, this was missing the side names, so a blue-green hook
+			// naming {{.label}} failed to render and printed nothing at all —
+			// which reads as a service with no hooks rather than as an error.
+			for _, phase := range []struct {
+				name  string
+				hooks []*hooks.Hook
+			}{
+				{"before", cp.Service.Before},
+				{"after", cp.Service.After},
+			} {
+				if err := runner.Run(ctx, cp.Service.Name, phase.name, phase.hooks, cp.HookVars()); err != nil {
+					return err
+				}
 			}
-			_ = runner.Run(ctx, cp.Service.Name, "before", cp.Service.Before, vars)
-			_ = runner.Run(ctx, cp.Service.Name, "after", cp.Service.After, vars)
 		}
 
 		if flagDiffExitCode && !p.Empty() {

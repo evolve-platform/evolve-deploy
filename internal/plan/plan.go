@@ -91,7 +91,7 @@ func (p *Plan) EnvRemovals() []string {
 	return out
 }
 
-// SmokeCommands gate the release. They run once, after everything has staged
+// SmokeHooks gate the release. They run once, after everything has staged
 // and before anything switches.
 //
 // Per release rather than per service, because that is what the useful test is.
@@ -99,7 +99,7 @@ func (p *Plan) EnvRemovals() []string {
 // request worth making goes through a router and touches several services at
 // once — so it belongs to none of them. A check of a single revision has not
 // been lost: it is a line in the same set, `curl -fsS {{url "purchase"}}/healthz`.
-func (p *Plan) SmokeCommands() []string {
+func (p *Plan) SmokeHooks() []*hooks.Hook {
 	if p.File.Strategy == nil || !p.Staging() {
 		return nil
 	}
@@ -196,8 +196,8 @@ func SmokeFuncs(lookup func(kind, name string) (string, error)) template.FuncMap
 // for is one this release will actually stage — both of which a typo gets wrong,
 // and both far better found now than after a staging phase that took minutes.
 func (p *Plan) checkSmoke() error {
-	commands := p.SmokeCommands()
-	if len(commands) == 0 {
+	smoke := p.SmokeHooks()
+	if len(smoke) == 0 {
 		return nil
 	}
 
@@ -211,7 +211,7 @@ func (p *Plan) checkSmoke() error {
 		return "", nil
 	})
 
-	if err := hooks.ValidateWith(commands, p.SmokeVars(), funcs); err != nil {
+	if err := hooks.ValidateWith(smoke, p.SmokeVars(), funcs); err != nil {
 		return fmt.Errorf("strategy.smoke: %w", err)
 	}
 	return nil
@@ -596,11 +596,11 @@ func (c *ServicePlan) checkHooks() []string {
 	}
 
 	var msgs []string
-	for phase, commands := range map[string][]string{
+	for phase, hs := range map[string][]*hooks.Hook{
 		"before": c.Service.Before,
 		"after":  c.Service.After,
 	} {
-		if err := hooks.Validate(commands, c.HookVars()); err != nil {
+		if err := hooks.Validate(hs, c.HookVars()); err != nil {
 			msgs = append(msgs, fmt.Sprintf("services.%s: %s hook: %v",
 				c.Service.Name, phase, err))
 		}
