@@ -66,7 +66,17 @@ func (d *rolloutDriver) took() []string {
 	return append([]string(nil), d.steps...)
 }
 
-func (d *rolloutDriver) Routable(t config.TargetType) bool { return t == config.TypeECS }
+func (d *rolloutDriver) Routable(t config.TargetType) bool  { return t == config.TypeECS }
+func (d *rolloutDriver) Pointable(t config.TargetType) bool { return d.Routable(t) }
+
+// fallback is what the fake reports a rollback would find, so the tests can
+// pin the line without pinning one cloud's answer to it.
+func (d *rolloutDriver) Fallback(t *config.Target) string {
+	if t.Strategy.KeepsWarm() {
+		return "warm"
+	}
+	return "stopped"
+}
 
 // sidesOf lets one target be a side out of step with the rest, which is the
 // state a split environment is in.
@@ -153,6 +163,8 @@ func (d *rolloutDriver) Settle(_ context.Context, ch *target.Change) error {
 
 func (d *rolloutDriver) Point(context.Context, *config.Target, string) error { return nil }
 
+func (d *rolloutDriver) Tidy(context.Context, *config.Target) error { return nil }
+
 func (d *rolloutDriver) Traffic(context.Context, *config.Target) ([]target.TrafficEntry, error) {
 	return nil, nil
 }
@@ -206,10 +218,29 @@ func TestChoreographyOrder(t *testing.T) {
 	if got := d.took(); !equal(got, want) {
 		t.Errorf("steps = %v, want %v", got, want)
 	}
-	for _, line := range []string{"staged green", "smoke passed", "green serves new, blue keeps old"} {
+	for _, line := range []string{
+		"staged green", "smoke passed",
+		"green serves new, rollback is blue old (stopped)",
+	} {
 		if !strings.Contains(out, line) {
 			t.Errorf("output does not mention %q:\n%s", line, out)
 		}
+	}
+}
+
+// The rollback line is the one thing a blue-green deploy says that a direct one
+// cannot, so it has to be true: keep_warm is the difference between a rollback
+// that is one write and one that starts a container first.
+func TestKeepWarmChangesWhatTheRollbackIs(t *testing.T) {
+	body := strings.Replace(bgService, "  type: blue-green", "  type: blue-green\n  keep_warm: true", 1)
+
+	_, out, err := runBlueGreen(t, newRolloutDriver().running("site", "old"), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if want := "rollback is blue old (warm)"; !strings.Contains(out, want) {
+		t.Errorf("output does not mention %q:\n%s", want, out)
 	}
 }
 

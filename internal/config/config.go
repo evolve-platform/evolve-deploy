@@ -13,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -108,6 +109,32 @@ type Strategy struct {
 	// error rather than a merge, because the staged containers are copied from
 	// the serving revision and the other side's value would come along.
 	Env map[string]map[string]string `yaml:"env"`
+
+	// KeepWarm leaves the previous version running at 0% traffic after the
+	// switch, instead of switching it off.
+	//
+	// A Container Apps revision that is not deactivated keeps its own scale
+	// rules, so with `minReplicas >= 1` the side nobody is using goes on
+	// costing money between releases. Off by default for that reason: the
+	// previous revision is deactivated once the new one serves, and a rollback
+	// starts it again.
+	//
+	// It is a pointer so a service can turn it off over a file that turned it
+	// on. What it buys is a rollback that is one write and no container start,
+	// which is worth paying for on the environment where an outage is measured
+	// in money and not on the four where it is not.
+	KeepWarm *bool `yaml:"keep_warm"`
+
+	// BakeTime is how long ECS keeps the old side up after the switch, and it
+	// is the ECS answer to the question keep_warm asks everywhere else.
+	//
+	// ECS terminates the previous version itself once this is up — CLEAN_UP is
+	// the platform's, not the tool's — so there the old side is never a
+	// standing cost and never a standing rollback either. It is a window. Zero,
+	// the default, means the switch is the end of it.
+	//
+	// A duration as Go writes them: 10m, 1h.
+	BakeTime string `yaml:"bake_time"`
 }
 
 // SideEnvNames is every variable named by any side, which is the set the tool
@@ -144,6 +171,19 @@ const SideEnvVar = "EVOLVE_DEPLOY_SIDE"
 // IsBlueGreen is the question every caller actually has.
 func (s *Strategy) IsBlueGreen() bool { return s != nil && s.Type == StrategyBlueGreen }
 
+// KeepsWarm reports whether the previous version stays running after a switch.
+func (s *Strategy) KeepsWarm() bool { return s != nil && s.KeepWarm != nil && *s.KeepWarm }
+
+// Bake is the parsed BakeTime, zero when unset. Validation has already refused
+// anything that does not parse, so the error is dropped here.
+func (s *Strategy) Bake() time.Duration {
+	if s == nil || s.BakeTime == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(s.BakeTime)
+	return d
+}
+
 // merge layers a service's block over the file's.
 //
 // Lists are replaced whole rather than appended. A service that wants no smoke
@@ -166,6 +206,14 @@ func (s *Strategy) merge(over *Strategy) *Strategy {
 		// half-inheriting a map of URLs is never what was meant.
 		if over.Env != nil {
 			out.Env = over.Env
+		}
+		// A pointer precisely so this can go the other way: a file that keeps
+		// every side warm and one service that is not worth it.
+		if over.KeepWarm != nil {
+			out.KeepWarm = over.KeepWarm
+		}
+		if over.BakeTime != "" {
+			out.BakeTime = over.BakeTime
 		}
 	}
 	return &out
@@ -312,6 +360,17 @@ type Target struct {
 	// conventional name — see target.PickContainer. Sidecars such as a reverse
 	// proxy or an OpenTelemetry collector are never touched.
 	Container string `yaml:"container"`
+
+	// TestURL is the address the test listener rule answers on, ECS only.
+	//
+	// Everywhere else the staged side has an address the tool can work out — a
+	// label FQDN on Container Apps, a tagged URI from the Cloud Run API. ECS
+	// routes test traffic through a listener rule, and a rule is not an
+	// address: it may match on a host, a port or a header, and only the first
+	// two are reachable by URL at all. So on ECS it is written down, and a
+	// blue-green ECS target without one is refused — a gate nobody can address
+	// is the whole point missing.
+	TestURL string `yaml:"test_url"`
 
 	// Code locates the deployment package for lambda and function-app targets.
 	// Neither has a registry to read a tag from, so the location has to be
@@ -636,6 +695,38 @@ func validateStrategy(where string, s *Strategy, fileLevel bool) []string {
 	if s.Type == StrategyDirect && len(s.Env) > 0 {
 		msgs = append(msgs, fmt.Sprintf(
 			"%s: `env` per side needs sides, which `type: direct` never has", where))
+	}
+
+	// Same again: there is no previous side to keep running when nothing is
+	// staged beside the version that serves.
+	if s.Type == StrategyDirect && s.KeepWarm != nil {
+		msgs = append(msgs, fmt.Sprintf(
+			"%s: `keep_warm` is about the side that stops serving, which `type: direct` never has",
+			where))
+	}
+	if s.Type == StrategyDirect && s.BakeTime != "" {
+		msgs = append(msgs, fmt.Sprintf(
+			"%s: `bake_time` is the window before the old side is terminated, and "+
+				"`type: direct` has no old side", where))
+	}
+	if s.BakeTime != "" {
+		if d, err := time.ParseDuration(s.BakeTime); err != nil {
+			msgs = append(msgs, fmt.Sprintf(
+				"%s.bake_time: %q is not a duration (try 10m or 1h)", where, s.BakeTime))
+		} else if d < 0 {
+			msgs = append(msgs, fmt.Sprintf(
+				"%s.bake_time: %s is negative", where, s.BakeTime))
+		}
+	}
+
+	// Two names for one idea would be two ways to be wrong. keep_warm is a
+	// standing state and bake_time is a window; a config that asks for both has
+	// not decided which platform it is talking about.
+	if s.KeepWarm != nil && s.BakeTime != "" {
+		msgs = append(msgs, fmt.Sprintf(
+			"%s: `keep_warm` and `bake_time` are the same question for different "+
+				"platforms — keep_warm keeps the old side standing (Container Apps), "+
+				"bake_time is how long before ECS terminates it. Set one.", where))
 	}
 
 	labels := s.Labels

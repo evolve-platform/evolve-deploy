@@ -1,0 +1,45 @@
+# evolve-platform, GCP production.
+#
+# Same file as tst, with one addition: production releases a side at a time.
+# Cloud Run needs no revision mode switched on — several revisions with a split
+# are always allowed — so Terraform only has to bootstrap the traffic block with
+# a tag on the side that serves, and then let go of it.
+#
+# There is no keep_warm here and setting it is refused. A revision with no
+# traffic scales itself to zero, so the idle side costs nothing without being
+# switched off; keeping one warm is scaling.min_instance_count on the template,
+# which Terraform owns. ⚠️ A *service*-level minimum does not apply to a tagged
+# revision, which is the one genuine trap on this platform.
+cloud:
+  provider: gcp
+  project: evolve-prd
+  region: europe-west4
+
+strategy:
+  type: blue-green
+  smoke:
+    - curl -fsS {{url "site"}}/healthz
+    - curl -fsS {{url "purchase"}}/healthz
+  # Each side reaches its own downstream, with nothing to propagate per request.
+  env:
+    blue:
+      ROUTER_URL: https://router---blue.evolve-prd.example
+    green:
+      ROUTER_URL: https://router---green.evolve-prd.example
+
+services:
+  purchase:
+    version: abc1234
+    type: cloud-run
+    env:
+      LOG_LEVEL: info
+      CTP_CLIENT_SECRET: ${secret:purchase-ctp-client-secret}
+    # Check against what is serving now, publish to the side this is going to.
+    before:
+      - hive schema:check   --service purchase --target prd-{{.previous_label}}
+    after:
+      - hive schema:publish --service purchase --target prd-{{.label}}
+
+  site:
+    version: def5678
+    type: cloud-run

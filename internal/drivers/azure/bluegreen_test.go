@@ -12,6 +12,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/appcontainers/armappcontainers/v3"
 
+	"github.com/evolve-platform/evolve-deploy/internal/config"
 	"github.com/evolve-platform/evolve-deploy/internal/refs"
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
@@ -402,5 +403,115 @@ func TestAlreadyDeactivatedIsNotAFailure(t *testing.T) {
 	}
 	if alreadyInState(errors.New("dial tcp: no such host")) {
 		t.Error("a plain error is a real failure")
+	}
+}
+
+// What a settle leaves running is the cost of the feature, so it is worth
+// pinning: one revision by default, and the previous one too when someone has
+// said the cold start is the more expensive half.
+func TestSettleKeep(t *testing.T) {
+	change := func(keepWarm *bool) *target.Change {
+		return &target.Change{
+			Target: &config.Target{
+				Name:     "site",
+				Strategy: &config.Strategy{Type: config.StrategyBlueGreen, KeepWarm: keepWarm},
+			},
+			Sides: &target.Sides{
+				Active: target.Side{Label: "blue", Revision: "site--rev-a"},
+				Idle:   target.Side{Label: "green", Revision: "site--rev-b"},
+			},
+			Payload: &bgPayload{staged: "site--rev-b"},
+		}
+	}
+
+	cases := []struct {
+		name string
+		ch   *target.Change
+		want []string
+	}{
+		{
+			// The default. The previous version keeps its label at 0% so the
+			// rollback still has a name, but a version nobody is using does not
+			// keep its replicas.
+			name: "unset switches the previous side off",
+			ch:   change(nil),
+			want: []string{"site--rev-b"},
+		},
+		{
+			name: "false switches the previous side off",
+			ch:   change(to.Ptr(false)),
+			want: []string{"site--rev-b"},
+		},
+		{
+			name: "true leaves it running",
+			ch:   change(to.Ptr(true)),
+			want: []string{"site--rev-b", "site--rev-a"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := settleKeep(tc.ch)
+			if len(got) != len(tc.want) {
+				t.Fatalf("keep = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("keep = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// Point has to start the revision it is about to hand traffic to, and this is
+// how it knows which one that is.
+func TestServingRevision(t *testing.T) {
+	got := servingRevision([]*armappcontainers.TrafficWeight{
+		tw("blue", "site--rev-a", 0),
+		tw("green", "site--rev-b", 100),
+	})
+	if got != "site--rev-b" {
+		t.Errorf("serving = %q, want site--rev-b", got)
+	}
+
+	// Nothing at 100% means nothing to start, and reading that as "the first
+	// one" would start the side being rolled away from.
+	if got := servingRevision([]*armappcontainers.TrafficWeight{
+		tw("blue", "site--rev-a", 50),
+		tw("green", "site--rev-b", 50),
+	}); got != "" {
+		t.Errorf("a split has no single serving revision, got %q", got)
+	}
+}
+
+// A tidy has no release to ask which revision it just made, so it reads the
+// traffic block instead. What it keeps is the same answer Settle gives.
+func TestTidyKeep(t *testing.T) {
+	block := []*armappcontainers.TrafficWeight{
+		tw("blue", "site--rev-a", 0),
+		tw("green", "site--rev-b", 100),
+		tw("", "site--rev-old", 0),
+	}
+
+	got := tidyKeep(block, false)
+	if len(got) != 1 || got[0] != "site--rev-b" {
+		t.Errorf("keep = %v, want only the serving revision", got)
+	}
+
+	// keep_warm spares the other label, and only the other label: an entry with
+	// no label is a leftover whichever way the knob is set.
+	got = tidyKeep(block, true)
+	if len(got) != 2 || got[0] != "site--rev-b" || got[1] != "site--rev-a" {
+		t.Errorf("keep = %v, want the serving revision and the other label", got)
+	}
+
+	// A split is refused rather than guessed at. Switching off the wrong half
+	// of one is not a cleanup, it is an outage.
+	if got := tidyKeep([]*armappcontainers.TrafficWeight{
+		tw("blue", "site--rev-a", 30),
+		tw("green", "site--rev-b", 70),
+	}, false); got != nil {
+		t.Errorf("keep = %v, want nothing to act on", got)
 	}
 }

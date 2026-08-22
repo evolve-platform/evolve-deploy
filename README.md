@@ -37,6 +37,7 @@ evolve-deploy diff    deploy/tst.yaml              # what would happen, changes 
 evolve-deploy diff    deploy/prd.yaml --exit-code  # non-zero if production has drifted
 evolve-deploy apply   deploy/tst.yaml              # roll it out
 evolve-deploy traffic deploy/prd.yaml              # which side is serving
+evolve-deploy rollback deploy/prd.yaml            # put the other side back
 ```
 
 The config path is the only positional argument, and the only thing that decides
@@ -361,6 +362,8 @@ services:
 | `smoke` | commands run against the staged side | empty = switch straight away |
 | `labels` | the two side names | default `[blue, green]` |
 | `env` | environment per side | see below |
+| `keep_warm` | leave the previous version running after the switch | default `false`, Container Apps only |
+| `bake_time` | how long before ECS terminates the old side | default `0`, ECS only |
 
 The file's block is the default and a service overrides it field by field. Lists
 and maps are replaced whole, never merged — `smoke: []` has to be sayable without
@@ -449,14 +452,30 @@ request, so recovery is switching it off:
 | the switch itself | traffic is where it was | no |
 | the cleanup afterwards | a warning; the deploy succeeded | no |
 
-The previous version stays running at 0%, which is what makes a rollback one
-write and no container start. It is cleaned up one deploy later, when its label
-moves to something new — so there is no retention setting and no cleanup
-command.
+The previous version keeps its label at 0% and that is the rollback target, but
+after the switch it is switched off. A Container Apps revision that is not
+deactivated holds on to its own scale rules, so with `minReplicas >= 1` the side
+nobody is using goes on costing money for as long as the pair stands — and a
+version nobody is using should not cost anything. Rolling back starts it again,
+which is a container start rather than the one write it would otherwise be.
 
-⚠️ Two live versions double the compute floor for that app between releases, and
-version N and N-1 are live at the same time against the same database. That is
-the familiar expand/contract discipline and the tool can see nothing about it.
+`keep_warm: true` buys that write back:
+
+```yaml
+strategy:
+  type: blue-green
+  keep_warm: true      # prd: an outage is measured in money, a cold start is not free
+```
+
+Set it per file or per service, which is the axis production and test actually
+differ on. Either way this is one line rewritten after every successful deploy,
+even when it already held, so a run that died halfway is tidied by the next
+release — there is no retention setting and no cleanup command.
+
+⚠️ Version N and N-1 are live at the same time against the same database while a
+release is being staged and checked. That is the familiar expand/contract
+discipline and the tool can see nothing about it. With `keep_warm` they also both
+hold replicas between releases, which doubles the compute floor for that app.
 
 There is **no gradual traffic shifting** — no 5% for a minute, then 20%. Both
 platforms can express it and this deliberately does not use it: to hold at 5%
@@ -465,8 +484,83 @@ metrics client here. The smoke test checks the new version deliberately, against
 a URL, before anyone reaches it — a better gate than 5% of traffic and an unread
 graph.
 
-Implemented for Azure Container Apps. Asking for it anywhere else is an explicit
-"not implemented" while planning, never a silent direct update.
+### Per cloud
+
+Implemented for Azure Container Apps, GCP Cloud Run and AWS ECS. Kubernetes has
+no implementation and asking for it there is an explicit "not implemented" while
+planning, never a silent direct update.
+
+The choreography is the same everywhere — stage, gate, switch — and so is the
+config. What differs is who owns the traffic, and that changes what a rollback
+is. It is worth knowing before you pick a cloud to be brave on.
+
+| | Container Apps | Cloud Run | ECS |
+|---|---|---|---|
+| who moves the traffic | the tool | the tool | ECS |
+| the sides | labels, alternating | tags, alternating | roles in one release |
+| the staged address | `<app>---<label>.<domain>` | from the API | `test_url`, written down |
+| after the switch | previous stopped | previous scales to zero | previous terminated |
+| cost of the idle side | zero, or `keep_warm` | zero | zero, or `bake_time` |
+| `traffic --to <label>` | yes | yes | no — no side to name |
+| `rollback` | any time | any time | until the release finishes |
+| `strategy.env` per side | yes | yes | no |
+
+**Azure Container Apps** is the reference. The tool owns `ingress.traffic`, the
+sides are labels it writes, and everything above works.
+
+**Cloud Run** is the same model with fewer preconditions — there is no revision
+mode to switch on, and the tagged URL comes back from the API rather than being
+assembled. Two differences worth knowing. A revision with no traffic scales
+itself to zero, so the idle side costs nothing without being switched off; and
+`keep_warm` is refused there, because keeping a revision warm is
+`scaling.min_instance_count` on the template, which Terraform owns. ⚠️ Note that
+a *service*-level minimum does not apply to a tagged revision, which is the one
+genuine trap on Cloud Run.
+
+**ECS is the other family.** ECS has a blue/green engine of its own and it is
+better than one this tool could build: it owns the target groups, the listener
+rules and the shifting, and it can roll back on a CloudWatch alarm. So the tool
+does not drive the rollout, it declares it and then answers the gate — a `PAUSE`
+lifecycle hook at `POST_TEST_TRAFFIC_SHIFT`, which is test traffic fully on the
+new side and production traffic still entirely on the old one. That is exactly
+where a smoke test belongs. No Lambda and no appspec: the exit code of a shell
+command still decides.
+
+Three consequences, all from ECS owning the sides rather than the tool:
+
+- **`test_url` is required.** The staged side is reached through the test
+  listener rule, and a rule is not an address — it may match on a host, a port
+  or a header. So it is written down on the target, and a blue-green ECS target
+  without one is refused rather than staged with nothing to point a gate at.
+- **`strategy.env` per side is refused.** Per-side environment exists so green
+  calls green, which needs the two sides to alternate and keep their names. ECS
+  swaps its own target groups, so the sides are roles in one release rather than
+  two standing environments.
+- **`rollback` works on a window, not on a side.** `traffic --to` does not
+  apply — there is no side to name — but `rollback` does, and it takes the other
+  shape: for as long as the deployment has not finished, the previous version is
+  still running and ECS can put the traffic back on it. That covers the
+  `bake_time` window after a switch, and a release whose pipeline died while
+  paused at the smoke gate. Once ECS has finished, `CLEAN_UP` has terminated the
+  old tasks and going back is a deploy of the previous version — which the
+  command says, with the line to run, rather than failing.
+
+  So `bake_time` is not just an accounting setting: it is how long `rollback`
+  keeps working. Zero means the switch is the end of it.
+
+```yaml
+strategy:
+  type: blue-green
+  bake_time: 10m        # ECS only: the window before the old side is terminated
+  smoke: [ 'curl -fsS {{url "site"}}/healthz' ]
+
+services:
+  site:
+    version: 27ec167
+    type: ecs
+    cluster: platform
+    test_url: https://site-test.internal.example
+```
 
 ### Which side, and telling anything about it
 
@@ -497,22 +591,54 @@ its own downstream by its own side with nothing to propagate. It is written and
 never compared: the side alternates every release, so diffing it would report a
 change on every run.
 
-### `evolve-deploy traffic`
+### `evolve-deploy rollback` and `evolve-deploy traffic`
 
 ```sh
-evolve-deploy traffic deploy/prd.yaml                        # where is it now
-evolve-deploy traffic deploy/prd.yaml --only site --to blue  # back, in one write
+evolve-deploy rollback deploy/prd.yaml              # put the other side back
+evolve-deploy rollback deploy/prd.yaml --only site  # take one service back
+evolve-deploy traffic  deploy/prd.yaml              # where is it now
+evolve-deploy traffic  deploy/prd.yaml --to blue    # onto a side by name
 ```
 
-Without `--to` it is read-only and answers "what is actually running". With
-`--to` it puts one label on 100% and the other on 0, in one write, waiting for
-nothing — the manual rollback, and the way out of a split. It reads the traffic
-block directly rather than through the checks `apply` uses, because the state it
-has to repair is exactly the state those checks refuse to interpret.
+`rollback` is the one to reach for, and it has two shapes because the platforms
+do. Where the tool owns the sides, a release moves every blue-green service to
+the same side at once, so going back is that move in reverse: it works out which
+side is not serving, checks that every target agrees on the answer and on the
+version behind it, prints what it is trading for what, and hands that side
+everything. Where the platform owns them — ECS — there is nothing to name, so it
+asks the platform to reverse the release it is still running instead. It refuses rather than guesses — a split, a side that has never
+served, targets that disagree — and every refusal names what it found and the
+command that resolves it. Half an environment on the old version is worse than
+either version everywhere — and `--only` is how you say that is what you meant.
 
-It moves traffic only. Anything published per side — a Hive target, a schema
-registry — still describes the version that was serving before, and the command
-says so.
+`traffic` without `--to` is read-only and answers "what is actually running".
+With `--to` it puts one label on 100% and the other on 0 by name, which is the
+way out of a split and the way onto a side `rollback` will not pick for you. It
+reads the traffic block directly rather than through the checks `apply` uses,
+because the state it has to repair is exactly the state those checks refuse to
+interpret.
+
+Both start the revision they are about to hand traffic to, and wait for it,
+because without `keep_warm` the side being rolled back to is stopped. Both also
+switch off what is no longer serving once the traffic has moved — the other half
+of the same thing, and without it a rollback would leave the side it came from
+running. A failure there is a warning, never a failed rollback: the traffic
+moved, which is what was asked for.
+
+That is also the way to clean up an app that has old revisions running with no
+label left on them, from before this existed or from a switch made by hand:
+point it at the side it is already on.
+
+```sh
+evolve-deploy traffic deploy/prd.yaml --to blue   # already on blue: moves nothing, tidies
+```
+
+Neither command asks for confirmation — a tool that asks during an outage is a
+tool in the way — so they say what they are about to do before doing it.
+
+They move traffic only. Anything published per side — a Hive target, a schema
+registry — still describes the version that was serving before, and both commands
+say so.
 
 The full design, including how this interacts with a federated GraphQL graph,
 is in [specs/blue-green.md](specs/blue-green.md).

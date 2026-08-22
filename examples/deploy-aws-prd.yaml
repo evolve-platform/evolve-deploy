@@ -1,0 +1,61 @@
+# evolve-platform, AWS production.
+#
+# Same file as tst, with one addition: production releases a side at a time.
+# ECS is the other family — it has a blue/green engine of its own, so the tool
+# declares the rollout and then answers the gate ECS offers rather than moving
+# any traffic itself. Three things follow, and all three are visible below.
+#
+#   bake_time  how long ECS keeps the old side up after the switch. It is the
+#              rollback window, and it is the ECS answer to keep_warm — which is
+#              refused here, because ECS terminates the old side itself and it
+#              is therefore never a standing cost or a standing rollback.
+#   test_url   where the test listener rule answers. A rule is not an address —
+#              it may match on a host, a port or a header — so the tool cannot
+#              derive it, and without it there is nothing to point a gate at.
+#   no `strategy.env` per side. Per-side environment exists so green calls
+#              green, which needs the sides to alternate and keep their names.
+#              ECS swaps its own target groups, so the sides here are roles in
+#              one release rather than two standing environments.
+#
+# Terraform owns the routing, as everywhere: an alternate target group, a
+# production listener rule, a test listener rule and a role, all declared on the
+# service, plus deployment_controller { type = "ECS" }. The tool reads them off
+# the service and refuses when one is missing — it never writes them.
+#
+# There is no side to point at, so `traffic --to` does not apply here.
+# `evolve-deploy rollback` does: for as long as ECS has not finished the
+# deployment the previous version is still running, and it asks ECS to put the
+# traffic back. bake_time below is how long that stays true.
+cloud:
+  provider: aws
+  account: "513712104672"
+  region: eu-west-1
+
+strategy:
+  type: blue-green
+  bake_time: 10m
+  smoke:
+    - curl -fsS {{url "purchase"}}/healthz
+
+services:
+  purchase:
+    version: abc1234
+    cluster: platform
+    envFrom:
+      - ${param:/evolve/${env}/purchase/setup}
+    env:
+      LOG_LEVEL: info
+      CTP_CLIENT_SECRET: ${secret:purchase/ctp-client-secret}
+    before:
+      - hive schema:check   --service purchase --target prd-{{.previous_label}}
+    after:
+      - hive schema:publish --service purchase --target prd-{{.label}}
+    targets:
+      - type: ecs
+        name: purchase
+        test_url: https://purchase-test.internal.evolve-prd.example
+      # A lambda has no listener rule and nothing to shift: it rides along with
+      # the service it shares an image with, and is written at the switch.
+      - type: lambda
+        name: purchase-events
+        code: { bucket: labdigital-evolve-artifacts, key: "purchase-sha-{{.version}}.zip" }

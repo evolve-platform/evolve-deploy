@@ -52,6 +52,19 @@ func (d *Driver) Routable(t config.TargetType) bool {
 	return t == config.TypeContainerApp
 }
 
+// Pointable: the traffic block is the tool's own, so a label can be handed
+// everything at any time.
+func (d *Driver) Pointable(t config.TargetType) bool { return d.Routable(t) }
+
+// Fallback: the previous revision keeps its label either way, and the question
+// is only whether it kept its replicas with it.
+func (d *Driver) Fallback(t *config.Target) string {
+	if t.Strategy.KeepsWarm() {
+		return "warm"
+	}
+	return "stopped"
+}
+
 // Sides reads the current split off the app.
 func (d *Driver) Sides(ctx context.Context, t *config.Target) (*target.Sides, error) {
 	app, err := d.getApp(ctx, t.Name)
@@ -151,9 +164,16 @@ func readSides(traffic []*armappcontainers.TrafficWeight, labels []string) (*tar
 	active := serving[0]
 	label := derefString(active.Label)
 	if label == "" {
+		// Nothing here can fix this — `traffic --to` moves a label that exists
+		// and cannot invent the first one — so the refusal names where it comes
+		// from instead of a command that would fail differently.
 		return nil, fmt.Errorf(
 			"100%% of the traffic goes to an entry with no label, so there is "+
-				"nothing to fall back to:\n%s", describeTraffic(traffic))
+				"nothing to fall back to:\n%s\n"+
+				"    A first side has to be bootstrapped in Terraform: give the serving\n"+
+				"    revision `label = \"%s\"` in the app's traffic_weight block, then leave\n"+
+				"    the block to the tool with ignore_changes.",
+			describeTraffic(traffic), labels[0])
 	}
 	idx := slices.Index(labels, label)
 	if idx < 0 {
@@ -388,20 +408,33 @@ func (d *Driver) Abandon(ctx context.Context, ch *target.Change) error {
 	return err
 }
 
-// Settle switches off everything that is not one of the two labelled revisions.
+// Settle switches off every revision that is not serving.
 //
-// The traffic half of the invariant is already in place: Switch writes the
+// The traffic half of the cleanup is already in place: Switch writes the
 // canonical two-entry block, which also drops any leftover entry a run that
 // died halfway left behind. So this is the deactivation, and repeating the
 // write here would be a second ARM round trip that changes nothing.
 //
-// The previous version deliberately stays — at 0%, labelled, running — because
-// that is what makes a rollback one write and no container start. It goes away
-// one deploy later, when its label moves to something new.
+// The previous version keeps its label at 0% — that is the rollback target and
+// it stays named — but it does not keep its replicas. A Container Apps revision
+// that is not deactivated holds on to its own scale rules, so an app with
+// minReplicas >= 1 pays for both sides for as long as the pair stands. Rolling
+// back therefore starts it again rather than finding it warm; `keep_warm` buys
+// the old behaviour back where that trade is worth making.
 func (d *Driver) Settle(ctx context.Context, ch *target.Change) error {
+	return d.deactivateRest(ctx, ch.Target.Name, settleKeep(ch))
+}
+
+// settleKeep is the list of revisions a settle leaves running. Split out from
+// Settle because the decision is worth testing and the ARM call is not.
+func settleKeep(ch *target.Change) []string {
 	p := ch.Payload.(*bgPayload)
-	return d.deactivateRest(ctx, ch.Target.Name,
-		[]string{p.staged, ch.Sides.Active.Revision})
+
+	keep := []string{p.staged}
+	if ch.Target.Strategy.KeepsWarm() {
+		keep = append(keep, ch.Sides.Active.Revision)
+	}
+	return keep
 }
 
 // Point puts all the traffic on one label without staging anything.
@@ -409,6 +442,12 @@ func (d *Driver) Settle(ctx context.Context, ch *target.Change) error {
 // It reads the traffic block directly instead of going through Sides, and that
 // is deliberate: the state this has to repair is exactly the state Sides
 // refuses to interpret.
+//
+// The revision is started before the weight moves, because after a settle the
+// side being rolled back to is deactivated. Handing traffic to it as it stands
+// would be a URL that resolves and answers nothing — the same failure the
+// staging path already guards against. Both calls are no-ops when it is already
+// running, so escaping a split is no slower than it was.
 func (d *Driver) Point(ctx context.Context, t *config.Target, label string) error {
 	app, err := d.getApp(ctx, t.Name)
 	if err != nil {
@@ -423,7 +462,79 @@ func (d *Driver) Point(ctx context.Context, t *config.Target, label string) erro
 	if err != nil {
 		return fmt.Errorf("container app %s: %w", t.Name, err)
 	}
+
+	if revision := servingRevision(next); revision != "" {
+		if err := d.activateIfStopped(ctx, t.Name, revision); err != nil {
+			return err
+		}
+		if err := d.waitRunning(ctx, t.Name, revision, readyTimeout); err != nil {
+			return err
+		}
+	}
 	return d.patchTraffic(ctx, t.Name, next)
+}
+
+// Tidy switches off everything that is not serving, for the paths that move
+// traffic without staging anything.
+//
+// Settle can name the revision to keep because it just created it. Here there
+// is no release to ask, so the traffic block is the source: whatever holds all
+// of it is what stays running. That also means this refuses a split rather than
+// picking a side — deactivating the wrong half of one is not a cleanup.
+func (d *Driver) Tidy(ctx context.Context, t *config.Target) error {
+	app, err := d.getApp(ctx, t.Name)
+	if err != nil {
+		return err
+	}
+	cfg := app.Properties.Configuration
+	if cfg == nil || cfg.Ingress == nil {
+		return fmt.Errorf("container app %s has no ingress", t.Name)
+	}
+
+	keep := tidyKeep(cfg.Ingress.Traffic, t.Strategy.KeepsWarm())
+	if len(keep) == 0 {
+		return fmt.Errorf(
+			"container app %s: no single revision carries all the traffic, so there is "+
+				"nothing to tidy around:\n%s", t.Name, describeTraffic(cfg.Ingress.Traffic))
+	}
+	return d.deactivateRest(ctx, t.Name, keep)
+}
+
+// tidyKeep is the list of revisions a tidy leaves running, read off the traffic
+// block. Empty when nothing carries all of it, which is a refusal rather than a
+// list: deactivating the wrong half of a split is not a cleanup.
+func tidyKeep(traffic []*armappcontainers.TrafficWeight, keepWarm bool) []string {
+	serving := servingRevision(traffic)
+	if serving == "" {
+		return nil
+	}
+
+	keep := []string{serving}
+	if !keepWarm {
+		return keep
+	}
+
+	// The other labelled revision is the rollback target and is meant to stay
+	// warm. Anything without a label is a leftover either way.
+	for _, w := range traffic {
+		if w == nil || derefString(w.Label) == "" {
+			continue
+		}
+		if name := derefString(w.RevisionName); name != "" && name != serving {
+			keep = append(keep, name)
+		}
+	}
+	return keep
+}
+
+// servingRevision names the revision a traffic block hands everything to.
+func servingRevision(traffic []*armappcontainers.TrafficWeight) string {
+	for _, w := range traffic {
+		if w != nil && derefInt32(w.Weight) == weightAll {
+			return derefString(w.RevisionName)
+		}
+	}
+	return ""
 }
 
 // pointTraffic rewrites a block so the named label carries everything.

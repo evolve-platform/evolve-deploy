@@ -96,6 +96,9 @@ func (d *Driver) Resolver() refs.Resolver { return &resolver{d: d} }
 func (d *Driver) Plan(ctx context.Context, want *target.Desired) (*target.Change, error) {
 	switch want.Target.Type {
 	case config.TypeECS:
+		if want.Target.Strategy.IsBlueGreen() {
+			return d.planECSBlueGreen(ctx, want)
+		}
 		return d.planECS(ctx, want)
 	case config.TypeLambda:
 		return d.planLambda(ctx, want)
