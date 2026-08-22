@@ -1,0 +1,83 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yaml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yaml"
+  workflow_dispatch:
+
+permissions: {}
+
+# One deploy at a time, and never cancel one halfway: a cancelled Pages deploy
+# leaves the site on whatever it managed to upload.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Before setup-node, so that its pnpm cache has a pnpm to ask about the
+      # store location. The version comes from `packageManager` in
+      # docs/package.json, which is also what wrote the lockfile.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          package_json_file: docs/package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: docs/pnpm-lock.yaml
+
+      # --frozen-lockfile is the default in CI and named anyway: a resolution
+      # that differs from the reviewed one should fail rather than be installed.
+      - name: Install
+        working-directory: docs
+        run: pnpm install --frozen-lockfile
+
+      # `astro check` first, then the build, then the link check — every
+      # internal link is relative so that `base` stays a single setting, and
+      # that is exactly the kind of link that rots without anyone noticing.
+      # All three are `pnpm run build`, so a pull request fails where a laptop
+      # would have.
+      - name: Build
+        working-directory: docs
+        run: pnpm run build
+
+      - name: Upload artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/dist
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

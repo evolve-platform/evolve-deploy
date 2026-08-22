@@ -1,0 +1,66 @@
+---
+title: evolve-deploy
+description: Stateless deployments to AWS, GCP, Azure and Kubernetes. It reads a config file, compares it against what is actually running, and rolls out the difference.
+template: splash
+hero:
+  tagline: Stateless deployments to AWS, GCP and Azure. No state file, no lock — the cloud already knows what it runs.
+  image:
+    light: ../../assets/mark-light.png
+    dark: ../../assets/mark-dark.png
+  actions:
+    - text: Get started
+      link: getting-started/introduction/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/evolve-platform/evolve-deploy
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, Code } from '@astrojs/starlight/components';
+
+```console
+$ evolve-deploy apply deploy/tst.yaml
+
+purchase  27ec167
+  container-app/evolve-tst-purchase                  c2a1950 -> 27ec167
+
+site  27ec167
+  container-app/evolve-tst-site                      5367b03 -> 27ec167
+
+  container-app/evolve-tst-purchase                  27ec167 in 1m21s
+  container-app/evolve-tst-site                      27ec167 in 1m27s
+
+done in 1m45s
+```
+
+<CardGrid stagger>
+	<Card title="A deployment lockfile" icon="document">
+		Desired state in git, actual state in the cloud. `git log` is the deploy
+		history and `git revert` is a rollback.
+	</Card>
+	<Card title="Nothing else installed" icon="rocket">
+		One binary. No cloud CLI, no Terraform, no runtime — and no state file to
+		lose, corrupt or lock.
+	</Card>
+	<Card title="A plan you can read" icon="approve-check">
+		`diff` resolves every reference and checks every image without touching
+		anything, so a typo is found before a release, not during one.
+	</Card>
+	<Card title="Blue-green where it counts" icon="random">
+		Stage the new version on the side carrying no traffic, run a smoke test
+		against the whole staged stack, then switch in one write.
+	</Card>
+</CardGrid>
+
+## Built for the Evolve Platform, useful well beyond it
+
+This came out of the [Evolve Platform](https://www.labdigital.nl/), where it
+deploys composable commerce stacks across three clouds. Nothing in it knows that.
+
+It has no opinion about your application, your language or your framework. If
+your infrastructure is declared in Terraform and your workloads run on ECS,
+Lambda, Cloud Run, Container Apps, Container App Jobs or Azure Functions, it
+will set the image and the environment on them and leave everything else alone.
+That is the whole contract, and it is [deliberately a small
+one](getting-started/how-it-works/).

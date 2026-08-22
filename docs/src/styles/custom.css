@@ -1,0 +1,18 @@
+/* Purple, the colour the setup action already brands itself with. */
+:root {
+	--sl-color-accent-low: #2a1a3d;
+	--sl-color-accent: #7c4dcc;
+	--sl-color-accent-high: #d3bdf5;
+}
+:root[data-theme='light'] {
+	--sl-color-accent-low: #e3d7f8;
+	--sl-color-accent: #6b34c4;
+	--sl-color-accent-high: #2c1553;
+}
+
+/* Several pages lean on option tables whose first column is a YAML key. Keeping
+   it from wrapping is what makes them scannable; the table scrolls instead. */
+.sl-markdown-content table th:first-child,
+.sl-markdown-content table td:first-child {
+	white-space: nowrap;
+}
