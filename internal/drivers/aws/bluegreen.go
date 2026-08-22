@@ -152,7 +152,7 @@ func checkBlueGreenService(t *config.Target, svc *ecstypes.Service) error {
 			"ecs service %s has no load balancer with an advanced configuration, so\n"+
 				"    there is nothing to shift traffic between. Blue-green on ECS needs an\n"+
 				"    alternate target group, a production listener rule, a test listener rule\n"+
-				"    and a role, all declared on the service in Terraform.", t.Name)
+				"    and a role, all declared on the service in Terraform", t.Name)
 	}
 	if awssdk.ToString(adv.AlternateTargetGroupArn) == "" {
 		missing = append(missing, "alternate_target_group_arn")
@@ -449,8 +449,8 @@ func (d *Driver) Point(_ context.Context, t *config.Target, label string) error 
 			"    ECS owns both target groups and swaps them itself, so a side is a role in\n"+
 			"    one release rather than something standing that can be named.\n"+
 			"    Use `evolve-deploy rollback` instead: while the previous version is still\n"+
-			"    running it puts the traffic back, and it says so plainly when that window\n"+
-			"    has closed.",
+			"    running it puts the traffic back, and it says so plainly once that window\n"+
+			"    has closed",
 		t.Name, label)
 }
 
@@ -631,15 +631,15 @@ func (d *Driver) planECSBlueGreen(
 				"    Per-side environment exists so a staged side reaches its own downstream —\n"+
 				"    green calling green — and that needs the two sides to alternate and keep\n"+
 				"    their names. ECS owns both target groups and swaps them itself, so the\n"+
-				"    sides are roles in one release rather than two standing environments.",
+				"    sides are roles in one release rather than two standing environments",
 			t.Name)
 	}
 	if t.Strategy.KeepsWarm() {
 		return nil, fmt.Errorf(
 			"ecs service %s: `keep_warm` cannot be honoured here.\n"+
 				"    ECS terminates the old side itself at CLEAN_UP, so it is never a standing\n"+
-				"    cost and never a standing rollback. Use `bake_time` for the window before\n"+
-				"    that happens.", t.Name)
+				"    cost and never a standing rollback. Use `bake_time` for the window\n"+
+				"    before that happens", t.Name)
 	}
 
 	sides, err := d.Sides(ctx, t)

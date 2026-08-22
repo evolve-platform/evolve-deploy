@@ -172,7 +172,7 @@ func readSides(traffic []*armappcontainers.TrafficWeight, labels []string) (*tar
 				"nothing to fall back to:\n%s\n"+
 				"    A first side has to be bootstrapped in Terraform: give the serving\n"+
 				"    revision `label = \"%s\"` in the app's traffic_weight block, then leave\n"+
-				"    the block to the tool with ignore_changes.",
+				"    the block to the tool with ignore_changes",
 			describeTraffic(traffic), labels[0])
 	}
 	idx := slices.Index(labels, label)

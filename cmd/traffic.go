@@ -234,7 +234,7 @@ func noSidesToMove(f *config.File, cloud string) error {
 			"    ECS owns both target groups and swaps them itself, so a side is a role in\n"+
 			"    one release rather than something standing that can be named.\n"+
 			"    To go back, use `evolve-deploy rollback %s`: while the previous version is\n"+
-			"    still running it puts the traffic back, and it says what to do instead when\n"+
-			"    that window has closed.",
+			"    still running it puts the traffic back, and it says what to do instead\n"+
+			"    once that window has closed",
 		f.Path, f.Path)
 }
