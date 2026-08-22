@@ -15,6 +15,7 @@ import (
 	"sync"
 	"text/template"
 
+	"github.com/evolve-platform/evolve-deploy/internal/logging"
 	"github.com/evolve-platform/evolve-deploy/internal/tmpl"
 )
 
@@ -30,6 +31,14 @@ type Runner struct {
 	// Width pads the [service] tag so hook output lines up in a column. Zero
 	// means pad to nothing, which is what a single service wants.
 	Width int
+	// Verbose streams what a hook prints, and times each one.
+	//
+	// Off, a hook that succeeds says nothing. A release runs a schema check, a
+	// publish and a smoke test per service, each of which is a CLI that prints a
+	// screenful, and none of it is the answer to what was deployed — which is six
+	// lines it would otherwise be buried under. A hook that *fails* still prints
+	// everything it printed, because that output is the diagnosis.
+	Verbose bool
 
 	// mu serialises writes to Out. Every service's hooks write whole lines,
 	// but whole lines from two processes still land on top of each other
@@ -86,15 +95,32 @@ func (r *Runner) RunWith(
 			continue
 		}
 
+		timer := logging.Start("run hook", "service", service, "phase", phase,
+			"command", line)
+
+		// Held rather than dropped: output nobody wants on a green run is the
+		// only account of a red one.
+		var held bytes.Buffer
+		sink := io.Writer(out)
+		if !r.Verbose {
+			sink = &held
+		}
+
 		// Through a shell, because a hook is written the way it would be typed:
 		// pipes, quoting and $VARS all work as expected.
 		cmd := exec.CommandContext(ctx, "sh", "-c", line)
 		cmd.Dir = r.Dir
-		cmd.Stdout = out
-		cmd.Stderr = out
+		cmd.Stdout = sink
+		cmd.Stderr = sink
 		if err := cmd.Run(); err != nil {
+			if held.Len() > 0 {
+				// Through the prefix writer, so a failure in one service's hook is
+				// still attributed when three ran at once.
+				_, _ = out.Write(held.Bytes())
+			}
 			return fmt.Errorf("%s hook failed: %s: %w", phase, line, err)
 		}
+		timer.Done()
 	}
 	return nil
 }
