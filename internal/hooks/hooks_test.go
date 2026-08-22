@@ -10,7 +10,7 @@ import (
 
 func TestRunSubstitutesAndCaptures(t *testing.T) {
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Out: &out, Verbose: true}
 
 	err := r.Run(context.Background(), "purchase", "after",
 		[]string{"echo published {{.name}} at {{.version}} to {{.env}}"},
@@ -68,7 +68,7 @@ func TestDryRunPrintsWithoutRunning(t *testing.T) {
 
 func TestOutputIsTaggedWithTheService(t *testing.T) {
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Out: &out, Verbose: true}
 
 	if err := r.Run(context.Background(), "discover", "before",
 		[]string{"echo checking schema"}, Vars{}); err != nil {
@@ -83,7 +83,7 @@ func TestTagsAreAlignedToTheWidestName(t *testing.T) {
 	// Three package managers printing at once is only readable if the tags
 	// form a column.
 	var out bytes.Buffer
-	r := &Runner{Out: &out, Width: len("discover") + 2}
+	r := &Runner{Out: &out, Verbose: true, Width: len("discover") + 2}
 
 	for _, name := range []string{"discover", "site"} {
 		if err := r.Run(context.Background(), name, "before",
@@ -105,7 +105,7 @@ func TestATrailingPartialLineIsNotSwallowed(t *testing.T) {
 	// A hook that ends without a newline is exactly where a last error tends
 	// to sit, so it must still come out.
 	var out bytes.Buffer
-	r := &Runner{Out: &out}
+	r := &Runner{Out: &out, Verbose: true}
 
 	if err := r.Run(context.Background(), "site", "after",
 		[]string{"printf 'no trailing newline'"}, Vars{}); err != nil {
@@ -121,7 +121,7 @@ func TestConcurrentHooksDoNotShredEachOther(t *testing.T) {
 	// package manager with plenty to say. No line may end up half one service
 	// and half another.
 	var out bytes.Buffer
-	r := &Runner{Out: &out, Width: len("discover") + 2}
+	r := &Runner{Out: &out, Verbose: true, Width: len("discover") + 2}
 
 	var wg sync.WaitGroup
 	for _, name := range []string{"discover", "purchase", "site"} {
@@ -151,5 +151,32 @@ func TestConcurrentHooksDoNotShredEachOther(t *testing.T) {
 		if !strings.HasPrefix(body, name+"-") {
 			t.Errorf("line is tagged %s but reads %q", tag, body)
 		}
+	}
+}
+
+func TestASucceedingHookIsSilentButAFailingOneIsNot(t *testing.T) {
+	// A release runs several CLIs per service and none of their output is the
+	// answer to what was deployed. But the moment one fails, what it printed is
+	// the only account of why — so silence is conditional on success, not on the
+	// flag.
+	var quiet bytes.Buffer
+	r := &Runner{Out: &quiet}
+	if err := r.Run(context.Background(), "purchase", "before",
+		[]string{"echo checking schema"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if quiet.String() != "" {
+		t.Errorf("a hook that succeeded printed %q", quiet.String())
+	}
+
+	var loud bytes.Buffer
+	r = &Runner{Out: &loud}
+	err := r.Run(context.Background(), "purchase", "before",
+		[]string{"echo breaking change detected; exit 1"}, nil)
+	if err == nil {
+		t.Fatal("a hook that exited non-zero was reported as success")
+	}
+	if !strings.Contains(loud.String(), "breaking change detected") {
+		t.Errorf("the failing hook's output was swallowed: %q", loud.String())
 	}
 }

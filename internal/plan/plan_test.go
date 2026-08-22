@@ -544,7 +544,7 @@ services:
 	var out strings.Builder
 	err = Apply(context.Background(), p, Options{
 		Driver: d,
-		Hooks:  &hooks.Runner{Out: &out},
+		Hooks:  &hooks.Runner{Out: &out, Verbose: true},
 		Out:    io.Discard,
 	})
 	if err == nil {

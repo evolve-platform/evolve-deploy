@@ -47,7 +47,7 @@ which environment is touched. Useful flags:
 |---|---|
 | `--set name=version` | override a version without editing the file; how CI deploys a test build |
 | `--only a,b` | limit the run to these services |
-| `-v`, `--verbose` | log every API call and every poll, to stderr |
+| `-v`, `--verbose` | log every step with how long it took, and stream what the hooks print, to stderr |
 | `--workers N` | services rolled out at once (default 16) |
 | `--env NAME` | override what `${env}` and `{{.env}}` expand to (default: the filename) |
 | `--var name=value` | pass a value from the pipeline to hooks as `{{.name}}` (repeatable) |
@@ -269,6 +269,12 @@ plus `EVOLVE_DEPLOY_SIDE`, which the tool writes itself.
 Shell commands, run once per service. The tool knows nothing about Hive or
 anything else: deploy-time gates belong next to the deploy rather than in
 Terraform, but they do not belong *inside* the tool.
+
+A hook that succeeds prints nothing. There are three of them per service on a
+normal release and each is a CLI with plenty to say, none of which is the answer
+to what was deployed. A hook that *fails* prints everything it printed, because
+that is the diagnosis — and `--verbose` streams all of it as it happens, tagged
+per service, with how long each hook took.
 
 ```yaml
 services:

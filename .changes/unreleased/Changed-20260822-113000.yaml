@@ -1,0 +1,3 @@
+kind: Changed
+body: 'A hook that succeeds no longer prints what it printed. Three CLIs per service with a screenful each is not the answer to what was deployed, and it buried the handful of lines that are; a hook that fails still prints everything, because that output is the diagnosis. `--verbose` streams it live as before, and now also times every step — each ARM call, each hook and each staged revision — so a release that feels slow can be read rather than guessed at.'
+time: 2026-08-22T11:30:00.000000000+02:00

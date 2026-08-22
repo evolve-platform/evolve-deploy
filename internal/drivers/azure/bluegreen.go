@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -308,6 +309,8 @@ func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, 
 	p := ch.Payload.(*bgPayload)
 	name := ch.Target.Name
 
+	timer := logging.Start("stage revision", "app", name, "label", ch.Sides.Idle.Label)
+
 	if ch.Sides.PinNeeded {
 		slog.Debug("pinning the active label before staging",
 			"app", name, "label", ch.Sides.Active.Label,
@@ -348,16 +351,41 @@ func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, 
 	if err := d.activateIfStopped(ctx, name, staged); err != nil {
 		return nil, err
 	}
-	if err := d.waitRunning(ctx, name, staged, readyTimeout); err != nil {
-		return nil, err
+	// Hanging the label on the revision and waiting for the revision to run are
+	// two waits on the same thing, and neither needs the other: the label is
+	// written at weight zero, and the smoke test that uses its URL does not run
+	// until staging has returned. One after the other means the whole of an ARM
+	// write on a container app is spent after the container is already up, so
+	// they go together and staging costs the slower of the two instead of both.
+	//
+	// The template patch has completed by now, so there are never two updates in
+	// flight on the same app — only this write and a read of the revision.
+	var (
+		wg       sync.WaitGroup
+		labelErr error
+	)
+	wg.Go(func() {
+		labelErr = d.patchTraffic(ctx, name, weights(
+			trafficEntry{ch.Sides.Active, weightAll},
+			trafficEntry{target.Side{Label: ch.Sides.Idle.Label, Revision: staged}, weightNone},
+		))
+	})
+	runErr := d.waitRunning(ctx, name, staged, readyTimeout)
+	wg.Wait()
+
+	// The revision first: a label that failed to attach is usually the symptom
+	// and "it never came up" is the diagnosis. Either way the release abandons,
+	// which puts the idle label back on what it named before and switches this
+	// revision off.
+	if runErr != nil {
+		return nil, runErr
+	}
+	if labelErr != nil {
+		return nil, fmt.Errorf("attaching label %s to %s: %w",
+			ch.Sides.Idle.Label, staged, labelErr)
 	}
 
-	if err := d.patchTraffic(ctx, name, weights(
-		trafficEntry{ch.Sides.Active, weightAll},
-		trafficEntry{target.Side{Label: ch.Sides.Idle.Label, Revision: staged}, weightNone},
-	)); err != nil {
-		return nil, fmt.Errorf("attaching label %s to %s: %w", ch.Sides.Idle.Label, staged, err)
-	}
+	timer.Done("revision", staged)
 
 	return &target.Staged{
 		Label:    ch.Sides.Idle.Label,

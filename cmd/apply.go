@@ -66,7 +66,7 @@ release deployed.`,
 
 		return plan.Apply(ctx, p, plan.Options{
 			Driver:      driver,
-			Hooks:       &hooks.Runner{Dir: flagDir, Out: out},
+			Hooks:       &hooks.Runner{Dir: flagDir, Out: out, Verbose: flagVerbose},
 			Out:         out,
 			Concurrency: flagWorkers,
 			Width:       ui.Width(p),
