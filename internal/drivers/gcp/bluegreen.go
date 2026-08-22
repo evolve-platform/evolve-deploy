@@ -163,7 +163,7 @@ func readSides(traffic []*runpb.TrafficTarget, labels []string) (*target.Sides, 
 				"nothing to fall back to:\n%s\n"+
 				"    A first side has to be bootstrapped in Terraform: give the serving\n"+
 				"    revision `tag = \"%s\"` in the service's traffic block, then leave the\n"+
-				"    block to the tool with ignore_changes.",
+				"    block to the tool with ignore_changes",
 			describeTraffic(traffic), labels[0])
 	}
 	idx := slices.Index(labels, tag)
@@ -642,7 +642,8 @@ func (d *Driver) planServiceBlueGreen(
 				"    A revision with no traffic scales itself to zero, and keeping one warm is\n"+
 				"    `scaling.min_instance_count` on the template, which Terraform owns — note\n"+
 				"    that a service-level minimum does not apply to a tagged revision.\n"+
-				"    Remove the setting, or set it on the template and leave it out here.", t.Name)
+				"    Remove the setting, or set it on the template and leave it out here",
+			t.Name)
 	}
 
 	svc, err := d.getService(ctx, t.Name)
