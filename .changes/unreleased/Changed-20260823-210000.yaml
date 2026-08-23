@@ -1,0 +1,3 @@
+kind: Changed
+body: '`bake_time` is now refused on Container Apps and Cloud Run instead of being read by nobody. It is the window before ECS terminates the old side, and only the ECS driver ever looked at it — set on either of the other two it parsed, validated and then did nothing, which is the one thing a capability is not allowed to do here: a rollback window someone wrote down and did not get is exactly the outcome they were trying to rule out. Both refusals name the setting that answers the same question on that platform — `keep_warm` on Container Apps, and on Cloud Run nothing, because a revision that keeps its tag at zero traffic is already the window and stays available until the next release takes it.'
+time: 2026-08-23T21:00:00.000000000+02:00

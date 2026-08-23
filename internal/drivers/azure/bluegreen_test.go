@@ -1,6 +1,7 @@
 package azure
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -513,5 +514,34 @@ func TestTidyKeep(t *testing.T) {
 		tw("green", "site--rev-b", 70),
 	}, false); got != nil {
 		t.Errorf("keep = %v, want nothing to act on", got)
+	}
+}
+
+// bake_time is refused rather than ignored, and the refusal points at the
+// setting that answers the same question here. Two spellings that both did
+// something would make the pair mean two things at once; one that silently did
+// nothing was worse, because a rollback window is exactly the thing nobody
+// notices the absence of until they need it.
+func TestBakeTimeIsRefusedOnContainerApps(t *testing.T) {
+	want := &target.Desired{
+		Service: "site",
+		Target: &config.Target{
+			Type: config.TypeContainerApp,
+			Name: "evolve-prd-site",
+			Strategy: &config.Strategy{
+				Type:     config.StrategyBlueGreen,
+				BakeTime: "10m",
+			},
+		},
+	}
+
+	_, err := (&Driver{}).planAppBlueGreen(context.Background(), want)
+	if err == nil {
+		t.Fatal("bake_time was accepted on container apps")
+	}
+	for _, want := range []string{"evolve-prd-site", "bake_time", "keep_warm"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not mention %q: %v", want, err)
+		}
 	}
 }
