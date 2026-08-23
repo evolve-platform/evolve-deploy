@@ -272,11 +272,12 @@ func TestADegradedRevisionIsOnlySuspicion(t *testing.T) {
 
 func TestRestartsTurnSuspicionIntoAVerdict(t *testing.T) {
 	// A container that has already died crashLoopRestarts times is not slow.
-	detail, crashing := describeReplicas([]*armappcontainers.Replica{
+	detail, container, crashing := describeReplicas([]*armappcontainers.Replica{
 		replica(
 			replicaContainer("main", false,
 				armappcontainers.ContainerAppContainerRunningStateWaiting,
-				"CrashLoopBackOff", crashLoopRestarts),
+				"Container is waiting with reason: CrashLoopBackOff on legion.",
+				crashLoopRestarts),
 			// The sidecar is up and has nothing to do with this.
 			replicaContainer("reverse-proxy", true,
 				armappcontainers.ContainerAppContainerRunningStateRunning, "", 0),
@@ -292,6 +293,49 @@ func TestRestartsTurnSuspicionIntoAVerdict(t *testing.T) {
 	if strings.Contains(detail, "reverse-proxy") {
 		t.Errorf("a container that is up was reported as a problem: %q", detail)
 	}
+	// What Container Apps writes is meant for a portal blade: a prefix that
+	// repeats the state beside it, and the name of the node that ran the thing.
+	// Neither survives being read at the end of a long error line.
+	if strings.Contains(detail, "waiting with reason") || strings.Contains(detail, "legion") {
+		t.Errorf("the platform's boilerplate reached the error: %q", detail)
+	}
+	// The logs of the container that is dying are the next thing to look at, so
+	// the command that shows them has to be able to name it.
+	if container != "main" {
+		t.Errorf("container = %q, want the one that is crashing", container)
+	}
+}
+
+func TestACrashLoopIsAVerdictWhateverTheRevisionSays(t *testing.T) {
+	// The case this exists for: Container Apps leaves the revision in Processing
+	// while the container inside it dies and is restarted, so the revision
+	// itself never says anything and the wait ran to readyTimeout -- ten minutes
+	// for a process that was gone in ten seconds. The restart count is a level
+	// down from where the revision reports, and it outranks the silence.
+	reason, certain := weighReplicas("", true)
+	if !certain {
+		t.Error("a crash loop under a quiet revision was not acted on")
+	}
+	if reason != "never started" {
+		t.Errorf("reason = %q, want what the container actually did", reason)
+	}
+
+	// The same fact also replaces what the revision does say, because "is
+	// Unhealthy" is a state and "never started" is the reason for it.
+	if reason, _ := weighReplicas("is Degraded", true); reason != "never started" {
+		t.Errorf("reason = %q, want the container's account over the revision's", reason)
+	}
+
+	// And with nothing crashing, silence stays silence: a container that is not
+	// up and has not died is one that is starting, and a strike here would end a
+	// release that was going to work after fifteen seconds.
+	if reason, certain := weighReplicas("", false); reason != "" || certain {
+		t.Errorf("a starting container produced a verdict: %q %v", reason, certain)
+	}
+	// A revision that reported badly is still only a suspicion on its own.
+	if reason, certain := weighReplicas("is Degraded", false); reason != "is Degraded" || certain {
+		t.Errorf("weighReplicas = %q %v, want the revision's suspicion unchanged", reason, certain)
+	}
 }
 
 func TestOneSentencePerBrokenContainer(t *testing.T) {
@@ -303,20 +347,20 @@ func TestOneSentencePerBrokenContainer(t *testing.T) {
 			"Container exited with code 1", 1))
 	}
 
-	detail, crashing := describeReplicas([]*armappcontainers.Replica{one(), one(), one()})
+	detail, _, crashing := describeReplicas([]*armappcontainers.Replica{one(), one(), one()})
 	if crashing {
 		t.Error("a single restart was called a crash loop")
 	}
 	if n := strings.Count(detail, "exited with code 1"); n != 1 {
 		t.Errorf("the same failure was reported %d times: %q", n, detail)
 	}
-	if !strings.Contains(detail, "1 restart(s)") {
+	if !strings.Contains(detail, "restarted once") {
 		t.Errorf("the restart count is missing: %q", detail)
 	}
 }
 
 func TestAHealthyRevisionHasNothingToDescribe(t *testing.T) {
-	detail, crashing := describeReplicas([]*armappcontainers.Replica{
+	detail, _, crashing := describeReplicas([]*armappcontainers.Replica{
 		replica(replicaContainer("main", true,
 			armappcontainers.ContainerAppContainerRunningStateRunning, "", 0)),
 		// A replica with nothing in it must not panic anything.

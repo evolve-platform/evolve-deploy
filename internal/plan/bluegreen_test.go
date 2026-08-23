@@ -289,6 +289,52 @@ func TestStageFailureSkipsTheGate(t *testing.T) {
 	}
 }
 
+// A failed release is read by someone who wants two things before they want the
+// stack trace: whether the old version is still serving, and whether the side
+// that failed is still up and still being charged for. Both used to be missing.
+// The failure was reported as "1 service(s) failed" over a list of container
+// apps, and the cleanup that put everything back said nothing at all.
+func TestAFailedReleaseSaysWhatIsServing(t *testing.T) {
+	d := newRolloutDriver()
+	d.failStage["site"] = true
+
+	_, out, err := runBlueGreen(t, d, bgService)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+
+	msg := err.Error()
+	if !strings.Contains(msg, "the release failed while staging green") {
+		t.Errorf("the error does not say what the release was doing:\n%s", msg)
+	}
+	if !strings.Contains(msg, "No traffic moved: blue still serves") {
+		t.Errorf("the error does not say what is serving now:\n%s", msg)
+	}
+	// One side, one phase, one paragraph — not one row in a table of services.
+	if strings.Contains(msg, "service(s) failed") {
+		t.Errorf("the release was counted as a service:\n%s", msg)
+	}
+	if !strings.Contains(out, "discarding green, blue keeps serving") {
+		t.Errorf("the cleanup was silent:\n%s", out)
+	}
+}
+
+// A switch that fails is the one failure where traffic did move, so the sentence
+// has to be the other one: it was put back.
+func TestAFailedSwitchSaysTheTrafficWentBack(t *testing.T) {
+	d := newRolloutDriver()
+	d.failSwitch["site"] = true
+
+	_, _, err := runBlueGreen(t, d, bgService)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "while switching to green") ||
+		!strings.Contains(msg, "The traffic is back on blue") {
+		t.Errorf("the error does not say where the traffic ended up:\n%s", msg)
+	}
+}
+
 // Settle is cleanup. The traffic is already on the new version, so a failure
 // here is a warning: removing a working version over a deactivate call that
 // returned 500 is worse than the leftover.

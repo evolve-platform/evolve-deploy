@@ -27,8 +27,8 @@ import (
 //
 // It is the backstop and not the mechanism. A revision that is never going to
 // start is normally recognised as such within a few polls, from the revision
-// itself; the deadline is for the case where Container Apps reports nothing
-// conclusive at all.
+// and the replicas under it; the deadline is for the case where Container Apps
+// reports nothing conclusive at all.
 const readyTimeout = 10 * time.Minute
 
 // revertTimeout bounds the same wait when putting a template back, and is much
@@ -247,7 +247,7 @@ func (d *Driver) waitReady(ctx context.Context, name string, timeout time.Durati
 				// of consecutive failures ends the wait.
 				strikes = 0
 			case certain:
-				return fmt.Errorf("%s: revision %s %s", name, latest, reason)
+				return fmt.Errorf("revision %s %s", latest, reason)
 			default:
 				strikes++
 				lastReason = reason
@@ -255,7 +255,7 @@ func (d *Driver) waitReady(ctx context.Context, name string, timeout time.Durati
 					"revision", latest, "reason", reason,
 					"strikes", strikes, "of", unhealthyStrikes)
 				if strikes >= unhealthyStrikes {
-					return fmt.Errorf("%s: revision %s %s", name, latest, reason)
+					return fmt.Errorf("revision %s %s", latest, reason)
 				}
 			}
 		}
@@ -265,8 +265,8 @@ func (d *Driver) waitReady(ctx context.Context, name string, timeout time.Durati
 			// about itself is the only clue there is. Better in the error than
 			// behind a --verbose rerun that will not reproduce it.
 			msg := fmt.Sprintf(
-				"%s: revision %s did not become ready within %s (ready revision is %s, state %s)",
-				name, latest, timeout, orNone(ready), lastState)
+				"revision %s did not become ready within %s (ready revision is %s, state %s)",
+				latest, timeout, orNone(ready), lastState)
 			if lastReason != "" {
 				msg += "; the revision last reported that it " + lastReason
 			}
@@ -281,8 +281,8 @@ func (d *Driver) waitReady(ctx context.Context, name string, timeout time.Durati
 	}
 }
 
-// inspectRevision reads the revision the app is trying to promote and says
-// whether it can still become ready.
+// inspectRevision reads the revision the app is trying to promote, and the
+// replicas under it, and says whether it can still become ready.
 //
 // It returns the reason it cannot, and whether that reason is certain. Certain
 // means the platform has stopped trying, or a container has already died more
@@ -302,18 +302,62 @@ func (d *Driver) inspectRevision(ctx context.Context, app, revision string) (rea
 	}
 
 	reason, certain = classifyRevision(got.Properties)
-	if reason == "" || certain {
+	if certain {
 		return reason, certain
 	}
 
-	// The revision says something is wrong but not what. The replicas do: a
-	// container that has already restarted several times turns "Degraded" from
-	// a suspicion into a fact, and either way its own state is the part worth
-	// putting in front of whoever reads the failed deploy.
-	if detail, crashing := d.inspectReplicas(ctx, app, revision); detail != "" {
-		return reason + " — " + detail, crashing
+	// The replicas are read even when the revision says nothing is wrong, and
+	// that case is what the extra call is for: Container Apps leaves a revision
+	// in Processing while the container inside it exits and is restarted, and it
+	// will sit there for the whole of readyTimeout. Ten minutes of waiting for a
+	// process that died in the first ten seconds, because the one fact that
+	// settles it — the restart count — is a level down from where the revision
+	// reports. Where the revision has already reported badly the replicas say
+	// what it would not: whether "Degraded" is a suspicion or a fact, and which
+	// container to go and read.
+	detail, container, crashing := d.inspectReplicas(ctx, app, revision)
+	reason, certain = weighReplicas(reason, crashing)
+	if reason == "" || detail == "" {
+		return reason, certain
+	}
+
+	// Where there is a reason, the containers are the whole of it: what they
+	// report, and where to read what they printed before they gave up.
+	return fmt.Sprintf("%s (container %s). Logs: %s",
+		reason, detail, d.logsCommand(app, revision, container)), certain
+}
+
+// weighReplicas settles what the revision and its replicas say between them.
+//
+// A crashing container outranks everything the revision reported, including a
+// revision that reported nothing: "is Unhealthy" — or Processing — buries the
+// one fact that matters, which is that the container is dying on start and the
+// revision never ran at all.
+//
+// With nothing crashing, a revision that says nothing keeps saying nothing. A
+// container that is not up and has not died is a container that is starting,
+// which is what every deploy looks like while it works; a strike here would end
+// a release that is going fine after fifteen seconds.
+func weighReplicas(reason string, crashing bool) (string, bool) {
+	if crashing {
+		return "never started", true
 	}
 	return reason, false
+}
+
+// logsCommand is the command that answers the question a failed revision
+// raises. The tool cannot read the container's own output — that is a different
+// API and a different permission — but it knows every argument needed to go and
+// look, and a message that stops at "it crashed" makes whoever reads it
+// reassemble those arguments from three places.
+func (d *Driver) logsCommand(app, revision, container string) string {
+	cmd := fmt.Sprintf(
+		"az containerapp logs show -g %s -n %s --revision %s",
+		d.file.Cloud.ResourceGroup, app, revision)
+	if container != "" {
+		cmd += " --container " + container
+	}
+	return cmd + " --type console --tail 50"
 }
 
 // classifyRevision reads a revision the way the portal does: the platform's own
@@ -352,28 +396,33 @@ func classifyRevision(props *armappcontainers.RevisionProperties) (reason string
 	return "", false
 }
 
-// inspectReplicas describes what the containers in a revision are doing. Only
-// called once the revision has already reported badly, so it costs nothing on
-// a deploy that works.
-func (d *Driver) inspectReplicas(ctx context.Context, app, revision string) (detail string, crashing bool) {
+// inspectReplicas describes what the containers in a revision are doing. One
+// extra read per poll while a revision is not yet serving, which buys the
+// crash loop that the revision's own state does not admit to.
+func (d *Driver) inspectReplicas(
+	ctx context.Context,
+	app, revision string,
+) (detail, container string, crashing bool) {
 	got, err := d.replicas.ListReplicas(ctx, d.file.Cloud.ResourceGroup, app, revision, nil)
 	if err != nil {
 		slog.Debug("could not list the replicas", "name", app,
 			"revision", revision, "err", err)
-		return "", false
+		return "", "", false
 	}
 	return describeReplicas(got.Value)
 }
 
-// describeReplicas summarises the containers that are not up, and says whether
-// one of them is past saving.
+// describeReplicas summarises the containers that are not up, says whether one
+// of them is past saving, and names one to point a logs command at.
 //
 // Restarts are what separate a slow start from a crash loop: a container that
 // exits is restarted immediately and indefinitely, so a count in the low single
 // digits is already a process that cannot stay up. RunningStateDetails is the
 // string the portal shows next to it — an exit code, or the reason the image
 // never ran at all.
-func describeReplicas(replicas []*armappcontainers.Replica) (detail string, crashing bool) {
+func describeReplicas(
+	replicas []*armappcontainers.Replica,
+) (detail, container string, crashing bool) {
 	var seen []string
 	for _, r := range replicas {
 		if r == nil || r.Properties == nil {
@@ -391,15 +440,27 @@ func describeReplicas(replicas []*armappcontainers.Replica) (detail string, cras
 				crashing = true
 			}
 
-			line := derefString(c.Name)
-			if c.RunningState != nil {
-				line += " is " + string(*c.RunningState)
+			name := derefString(c.Name)
+			if container == "" || restarts >= crashLoopRestarts {
+				// The one to read the logs of is the one that is dying, not
+				// whichever container happened to be listed first.
+				container = name
 			}
-			if d := derefString(c.RunningStateDetails); d != "" {
-				line += " (" + d + ")"
+
+			line := name
+			// The state and the detail are two ways of saying the same thing —
+			// "is Waiting" next to "CrashLoopBackOff" adds a word and no fact —
+			// so the detail wins where there is one.
+			switch got := cleanDetail(derefString(c.RunningStateDetails)); {
+			case got != "":
+				line += ": " + got
+			case c.RunningState != nil:
+				line += " is " + string(*c.RunningState)
+			default:
+				line += " is not ready"
 			}
 			if restarts > 0 {
-				line += fmt.Sprintf(", %d restart(s)", restarts)
+				line += ", " + restartCount(restarts)
 			}
 
 			// Every replica of a broken revision reports the same thing, and
@@ -410,7 +471,46 @@ func describeReplicas(replicas []*armappcontainers.Replica) (detail string, cras
 		}
 	}
 	sort.Strings(seen)
-	return strings.Join(seen, "; "), crashing
+	return strings.Join(seen, "; "), container, crashing
+}
+
+// cleanDetail keeps the fact out of what Container Apps writes for a portal
+// blade.
+//
+// "Container is waiting with reason: CrashLoopBackOff on legion." is one fact, a
+// prefix restating the state printed next to it, and the name of the node that
+// happened to run it — none of which survives being read at the end of a long
+// error line. The reason is the whole of it.
+func cleanDetail(s string) string {
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), "."))
+
+	// Only split on " on " where the prefix matched, because only then is the
+	// rest of the sentence known to be "<reason> on <node>".
+	if rest, ok := cutPrefixFold(s, "container is waiting with reason:"); ok {
+		reason, _, _ := strings.Cut(strings.TrimSpace(rest), " on ")
+		return reason
+	}
+	// "Container exited with code 1" reads as a sentence about the container it
+	// is already printed beside. With the space, so that a detail about
+	// something merely starting with the word survives whole.
+	if rest, ok := cutPrefixFold(s, "container "); ok {
+		return strings.TrimSpace(rest)
+	}
+	return s
+}
+
+func cutPrefixFold(s, prefix string) (string, bool) {
+	if len(s) < len(prefix) || !strings.EqualFold(s[:len(prefix)], prefix) {
+		return s, false
+	}
+	return s[len(prefix):], true
+}
+
+func restartCount(n int32) string {
+	if n == 1 {
+		return "restarted once"
+	}
+	return fmt.Sprintf("restarted %d times", n)
 }
 
 // nextContainers copies the template and replaces the image tag of one

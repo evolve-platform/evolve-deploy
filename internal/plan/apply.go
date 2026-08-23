@@ -150,28 +150,46 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 	}
 	wg.Wait()
 
-	var failed, skipped []string
+	var (
+		failed, skipped []string
+		relErr          *releaseError
+	)
 	for _, name := range slices.Sorted(maps.Keys(runs)) {
 		switch r := runs[name]; {
 		case r.err != nil:
+			// The staged release is not one service among several, and reporting
+			// it as one read as "1 service(s) failed" above a list of three
+			// container apps. It is one phase of one side, so it says so itself.
+			var rel *releaseError
+			if errors.As(r.err, &rel) {
+				relErr = rel
+				continue
+			}
 			failed = append(failed, fmt.Sprintf("%s: %v", name, r.err))
 		case r.blocker != "":
 			skipped = append(skipped, fmt.Sprintf("%s, waiting on %s", name, r.blocker))
 		}
 	}
 
-	if len(failed) > 0 {
-		msg := fmt.Sprintf("%d service(s) failed after %s:\n  - %s",
-			len(failed), time.Since(started).Round(time.Second),
-			strings.Join(failed, "\n  - "))
+	if len(failed) > 0 || relErr != nil {
+		elapsed := time.Since(started).Round(time.Second)
+
+		var parts []string
+		if relErr != nil {
+			parts = append(parts, relErr.describe(elapsed))
+		}
+		if len(failed) > 0 {
+			parts = append(parts, fmt.Sprintf("%d service(s) failed after %s:\n  - %s",
+				len(failed), elapsed, strings.Join(failed, "\n  - ")))
+		}
 		// Named separately from the failures, because a service that never ran
 		// has nothing wrong with it and counting it as a failure sends whoever
 		// reads this looking in the wrong place.
 		if len(skipped) > 0 {
-			msg += fmt.Sprintf("\n%d service(s) were not deployed at all:\n  - %s",
-				len(skipped), strings.Join(skipped, "\n  - "))
+			parts = append(parts, fmt.Sprintf("%d service(s) were not deployed at all:\n  - %s",
+				len(skipped), strings.Join(skipped, "\n  - ")))
 		}
-		return errors.New(msg)
+		return errors.New(strings.Join(parts, "\n"))
 	}
 
 	// The total, which is the number nobody can work out from the per-target
@@ -403,6 +421,37 @@ func orNone(s string) string {
 // name, and it cannot collide with one: the config reserves it.
 const releaseNode = config.ReleaseName
 
+// releaseError is the failure of the staged release as a whole.
+//
+// It reads as a paragraph rather than as one entry in a list of services,
+// because that is what it is: one side, one phase of it, and a set of apps that
+// went wrong together. What that paragraph has to end on is what is serving now
+// — a release that failed after ten minutes of staging is read by someone who
+// wants to know whether the environment is still up before they want to know
+// why it is not — so the sentence is carried separately and printed last. The
+// elapsed time is left to Apply, which is the only place that knows it.
+type releaseError struct {
+	// phase is what the release was doing, and reads after "while".
+	phase string
+	// state is what is serving now, as its own sentence.
+	state string
+	// errs is one line per thing that went wrong.
+	errs []string
+}
+
+func (e *releaseError) Error() string { return e.describe(0) }
+
+func (e *releaseError) describe(after time.Duration) string {
+	head := "the release failed"
+	if e.phase != "" {
+		head += " while " + e.phase
+	}
+	if after > 0 {
+		head += " after " + after.String()
+	}
+	return fmt.Sprintf("%s:\n  - %s\n%s", head, strings.Join(e.errs, "\n  - "), e.state)
+}
+
 // bgTarget is one staged target and the service it belongs to.
 //
 // The phases run over the whole release while hooks and smoke commands stay a
@@ -455,22 +504,35 @@ func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options)
 		}
 	}
 
+	// checkOneSide has already refused a release whose apps disagree, so these
+	// two names describe every target in it.
+	side, serving := p.Side()
+
 	staged, errs := stageAll(ctx, rollout, routable, o)
+	phase := "staging " + side
 	if len(errs) == 0 {
-		errs = smokeRelease(ctx, p, routable, staged, o)
+		if errs = smokeRelease(ctx, p, routable, staged, o); len(errs) > 0 {
+			phase = "the smoke test"
+		}
 	}
 	if len(errs) > 0 {
 		// Nothing has served from any of this, so putting it back is free.
-		errs = append(errs, abandonAll(ctx, rollout, changes(routable), o)...)
-		sort.Strings(errs)
-		return fmt.Errorf("\n      %s", strings.Join(errs, "\n      "))
+		undone := abandonAll(ctx, rollout, changes(routable), o)
+		return &releaseError{
+			phase: phase,
+			state: nothingServed(side, serving, len(undone) > 0),
+			errs:  sorted(errs, undone),
+		}
 	}
 
 	if errs := switchAll(ctx, rollout, routable, riders, o); len(errs) > 0 {
-		errs = append(errs, abandonAll(ctx, rollout, changes(routable), o)...)
-		errs = append(errs, revert(ctx, changes(riders), o)...)
-		sort.Strings(errs)
-		return fmt.Errorf("\n      %s", strings.Join(errs, "\n      "))
+		undone := abandonAll(ctx, rollout, changes(routable), o)
+		undone = append(undone, revert(ctx, changes(riders), o)...)
+		return &releaseError{
+			phase: "switching to " + side,
+			state: putBack(serving, len(undone) > 0),
+			errs:  sorted(errs, undone),
+		}
 	}
 
 	// A failure from here is a warning: the traffic is on the new version and
@@ -512,9 +574,49 @@ func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options)
 	}
 	if len(failed) > 0 {
 		sort.Strings(failed)
-		return fmt.Errorf("\n      %s", strings.Join(failed, "\n      "))
+		return &releaseError{
+			phase: "running the after hooks",
+			state: fmt.Sprintf(
+				"The deploy itself worked: %s is serving and nothing was rolled back", side),
+			errs: failed,
+		}
 	}
 	return nil
+}
+
+// nothingServed is the sentence for a release that failed before the traffic
+// moved. It is the first thing worth knowing, and on a release that failed after
+// ten minutes of staging it is usually the only thing worth knowing.
+func nothingServed(side, serving string, kept bool) string {
+	if kept {
+		// The reassurance would be a lie, and the list below says which app it
+		// would be a lie about.
+		return "Some of the staged side could not be put back — check the traffic " +
+			"on the targets below before retrying"
+	}
+	return fmt.Sprintf(
+		"No traffic moved: %s still serves the version it served before, "+
+			"and the %s revisions were switched off", serving, side)
+}
+
+// putBack is the same sentence for a switch that failed, where some of the
+// traffic did move and was moved back.
+func putBack(serving string, kept bool) string {
+	if kept {
+		return "The traffic could not be put back everywhere — check it on the " +
+			"targets below before retrying"
+	}
+	return fmt.Sprintf("The traffic is back on %s, which serves the version "+
+		"it served before", serving)
+}
+
+// sorted is the failures of a phase followed by whatever the cleanup after it
+// could not undo, in one list. Sorted so that a release of fourteen services
+// reports them in the same order twice.
+func sorted(errs, cleanup []string) []string {
+	out := append(errs, cleanup...)
+	sort.Strings(out)
+	return out
 }
 
 // stageAll creates every new revision at once. They carry no traffic, so there
@@ -541,8 +643,7 @@ func stageAll(
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				errs = append(errs, fmt.Sprintf("%s: staging %s: %v",
-					ch.Target.Label(), it.cp.Side, err))
+				errs = append(errs, fmt.Sprintf("%s: %v", ch.Target.Label(), err))
 				fmt.Fprintf(o.Out, "  %-*s failed to stage after %s\n",
 					o.Width, ch.Target.Label(), time.Since(started).Round(time.Second))
 				return
@@ -693,6 +794,11 @@ func switchAll(
 
 // abandonAll puts the traffic back and switches off the revisions that never
 // served anything.
+//
+// It says so as it goes. A release that fails leaves the question of what is
+// running now, and a silent cleanup means reading the failure and then going to
+// the portal to find out whether a staged side is still up and still being
+// charged for. The answer belongs in the output that raised the question.
 func abandonAll(
 	ctx context.Context,
 	r target.Rollout,
@@ -706,6 +812,10 @@ func abandonAll(
 	)
 
 	for _, ch := range changes {
+		fmt.Fprintf(o.Out, "  %-*s discarding %s, %s keeps serving %s\n", o.Width,
+			ch.Target.Label(), ch.Sides.Idle.Label, ch.Sides.Active.Label,
+			orNone(ch.FromVersion))
+
 		wg.Go(func() {
 			if err := r.Abandon(ctx, ch); err != nil {
 				mu.Lock()

@@ -738,7 +738,7 @@ func (d *Driver) waitRunning(
 				"revision", revision, "err", err)
 		} else if props := got.Properties; props != nil {
 			if !derefBool(props.Active) {
-				return fmt.Errorf("%s: revision %s is deactivated", app, revision)
+				return fmt.Errorf("revision %s is deactivated", revision)
 			}
 
 			if props.RunningState != nil &&
@@ -755,19 +755,19 @@ func (d *Driver) waitRunning(
 			case reason == "":
 				strikes = 0
 			case certain:
-				return fmt.Errorf("%s: revision %s %s", app, revision, reason)
+				return fmt.Errorf("revision %s %s", revision, reason)
 			default:
 				strikes++
 				lastReason = reason
 				if strikes >= unhealthyStrikes {
-					return fmt.Errorf("%s: revision %s %s", app, revision, reason)
+					return fmt.Errorf("revision %s %s", revision, reason)
 				}
 			}
 		}
 
 		if time.Now().After(deadline) {
-			msg := fmt.Sprintf("%s: revision %s was not running within %s",
-				app, revision, timeout)
+			msg := fmt.Sprintf("revision %s was not running within %s",
+				revision, timeout)
 			if lastReason != "" {
 				msg += "; it last reported that it " + lastReason
 			}
