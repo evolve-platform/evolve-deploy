@@ -12,7 +12,7 @@ There is an action that installs the binary, verifies it and puts it on `PATH`:
 - name: Setup evolve-deploy
   uses: evolve-platform/setup-evolve-deploy@v1
   with:
-    version: v0.5.0
+    version: v0.6.0
     token: ${{ secrets.GITHUB_TOKEN }}
 
 - name: Deploy
@@ -24,7 +24,7 @@ There is an action that installs the binary, verifies it and puts it on `PATH`:
 | Input | Required | Default | |
 |---|---|---|---|
 | `token` | yes | | Token with read access to the release repository |
-| `version` | no | `latest` | Release tag, e.g. `v0.5.0` |
+| `version` | no | `latest` | Release tag, e.g. `v0.6.0` |
 | `install-dir` | no | `${RUNNER_TEMP}/evolve-deploy` | Where the binary is written. Prepended to `PATH` |
 | `repository` | no | `evolve-platform/evolve-deploy` | Repository to take the release from |
 
@@ -160,7 +160,7 @@ jobs:
 
       - uses: evolve-platform/setup-evolve-deploy@v1
         with:
-          version: v0.5.0
+          version: v0.6.0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy

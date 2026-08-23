@@ -74,7 +74,7 @@ $ evolve-deploy diff deploy/tst.yaml
 purchase  27ec167
   container-app/evolve-tst-purchase                  c2a1950 -> 27ec167
 
-1 service, 1 target to deploy
+1 target in 1 service
 ```
 
 If the config is wrong, this is where you find out. A tag that was never pushed,

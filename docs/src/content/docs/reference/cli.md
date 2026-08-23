@@ -75,7 +75,7 @@ version everywhere.
 
 ```console
 $ evolve-deploy version
-evolve-deploy 0.5.0 (60b8822)
+evolve-deploy 0.6.0 (d6af824)
 ```
 
 A build from `go install` reports `dev`, because the stamps come from the

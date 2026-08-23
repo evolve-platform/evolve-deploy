@@ -130,16 +130,51 @@ The options for each action are on the [Actions](../../deploying/actions/) page.
 
 See [Templating](../../configuration/templating/).
 
-## Checked while reading the config
+## Refused before anything is deployed
 
-These fail before any credentials are used and before anything is deployed:
+Two groups, and the difference is worth knowing when a pipeline fails: the first
+never touches a cloud, so it fails the same way on a laptop with no credentials
+as it does in CI.
 
-- A `depends_on` naming a service that is not in the file
-- A cycle between services
+### While reading the config
+
+Parsing is strict — an unknown key is an error — and the whole file is checked at
+once, so one run reports every mistake in it rather than the first:
+
+- An unknown key, or a field belonging to a different `cloud.provider` than the
+  one declared
+- A `type` that is not valid on the declared provider
+- A `depends_on` naming a service that is not in the file, or naming itself
+- A cycle between services, reported as the path around it
 - `depends_on` between two blue-green services
-- Sides in `strategy.env` that do not all name the same variables
-- `env` declared on a `function-app` target
-- `keep_warm` outside Container Apps, `bake_time` outside ECS
-- `strategy.env` on an ECS target
-- A blue-green ECS target with no `test_url`
-- Fields belonging to a different `cloud.provider` than the one declared
+- A service called `(release)`, which is what the staged release is reported as
+- Two targets with the same type and name
+- `base`, `cluster` or `container` outside `ecs`; `code` outside `lambda` and
+  `function-app`; `code.bucket` on a `function-app`
+- A missing `cluster` on `ecs`, or missing `code` on `lambda`
+- `EVOLVE_DEPLOY_SIDE` set by hand — the tool writes it
+- `smoke` on a service rather than on the file's `strategy` block
+- `smoke`, `env`, `keep_warm` or `bake_time` under `type: direct`, which has no
+  side for any of them to mean anything about
+- `keep_warm` together with `bake_time`
+- `labels` that is not exactly two distinct non-empty names
+- Sides in `strategy.env` that do not all name the same variables, or a side
+  that is not one of the labels
+- A hook that is neither a command, a `cmd` nor a known `uses`, or one missing an
+  option its action requires
+
+### While planning, against the cloud
+
+A capability the driver cannot honour is refused here rather than downgraded, so
+these need credentials but still deploy nothing:
+
+- A blue-green `ecs` target with no `test_url`
+- `strategy.env` on an `ecs` target
+- `keep_warm` outside Container Apps
+- `bake_time` outside ECS
+- `env` on a `function-app` target
+- An image tag that does not exist, or a reference that resolves to nothing
+- Traffic, listener rules or scale rules Terraform never declared
+- A hook naming a template variable that does not exist, or an action whose API
+  key is nowhere in the environment — checked here because an `after` hook runs
+  on a release that has already succeeded

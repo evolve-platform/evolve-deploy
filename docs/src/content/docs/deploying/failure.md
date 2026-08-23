@@ -72,15 +72,51 @@ the second time.
 
 ## After a failed blue-green release
 
-A failed blue-green deploy is a **non-event**. The staged side never served a
-request.
+A failed blue-green deploy is normally a **non-event**. The staged side never
+served a request.
 
 | Fails | What happens | Does a user notice? |
 |---|---|---|
 | the staged revision never becomes ready | switched off, traffic untouched | no |
 | `smoke` | switched off, traffic untouched | no |
-| the switch itself | traffic is where it was | no |
-| the cleanup afterwards | a warning; the deploy succeeded | no |
+| the switch itself | traffic is put back where it was | no |
+| putting it back | said explicitly; go and look | possibly |
+| the cleanup after a successful switch | a warning; the deploy succeeded | no |
+
+The fourth row is the reason the third is not the last word. Switching a side
+back is itself a set of calls to the platform, and if one of those fails the
+release has no reassurance to offer — so it does not offer one.
+
+### It says which of those happened
+
+A failed release reads as a release rather than as a row in a table of services:
+the whole staged side is one unit of work, so a failure in it is one paragraph.
+It names the phase, lists a line per target, and **ends** on what is serving,
+because that is what gets read first:
+
+```console
+the release failed while staging blue after 10m38s:
+  - container-app/evolve-prd-purchase: revision evolve-prd-purchase--0000039 never started (container main: CrashLoopBackOff, restarted 5 times). Logs: az containerapp logs show -g evolve-prd -n evolve-prd-purchase --revision evolve-prd-purchase--0000039 --container main --type console --tail 50
+No traffic moved: green still serves the version it served before, and the blue revisions were switched off
+```
+
+That last sentence is the one that differs, and the situations it separates used
+to look identical:
+
+| | |
+|---|---|
+| nothing moved | `No traffic moved: green still serves the version it served before, and the blue revisions were switched off` |
+| it moved and was put back | `The traffic is back on green, which serves the version it served before` |
+| the staged side would not switch off | `Some of the staged side could not be put back — check the traffic on the targets below before retrying` |
+| the traffic would not go back | `The traffic could not be put back everywhere — check it on the targets below before retrying` |
+| only an `after` hook failed | `The deploy itself worked: blue is serving and nothing was rolled back` |
+
+The two middle ones are where the reassurance would have been a lie, so there is
+none: the list above the sentence names the targets it would have been a lie
+about.
+
+The cleanup also prints as it goes, so "is the staged side still running, and
+still being charged for" is answered by the deploy log rather than by the portal.
 
 And if a release succeeded but the version turns out to be bad,
 [`rollback`](../../blue-green/rollback/) is one write.

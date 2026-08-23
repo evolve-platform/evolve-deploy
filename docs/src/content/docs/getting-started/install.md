@@ -15,7 +15,7 @@ from the [releases page](https://github.com/evolve-platform/evolve-deploy/releas
 or fetch it directly:
 
 ```sh
-VERSION=0.5.0
+VERSION=0.6.0
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')      # linux | darwin
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
 
@@ -52,7 +52,7 @@ and puts the binary on `PATH`:
 ```yaml
 - uses: evolve-platform/setup-evolve-deploy@v1
   with:
-    version: v0.5.0
+    version: v0.6.0
 ```
 
 See [GitHub Actions](../../ci/github-actions/) for the full setup, including
@@ -62,7 +62,7 @@ cloud authentication.
 
 ```console
 $ evolve-deploy version
-evolve-deploy 0.5.0 (60b8822)
+evolve-deploy 0.6.0 (d6af824)
 ```
 
 ## Cloud credentials
