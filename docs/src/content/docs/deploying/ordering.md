@@ -57,7 +57,14 @@ whole-environment one.
 written for it:
 
 ```console
-site        not deployed (depends_on: discover failed)
+  site                               skipped, discover did not deploy
+```
+
+and again at the end, counted separately from the failures:
+
+```console
+1 service(s) were not deployed at all:
+  - site, waiting on discover
 ```
 
 ## Checked while reading the config

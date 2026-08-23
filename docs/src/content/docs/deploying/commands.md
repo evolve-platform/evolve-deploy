@@ -32,7 +32,7 @@ purchase  27ec167
 site  27ec167
   container-app/evolve-tst-site                      5367b03 -> 27ec167
 
-2 services, 2 targets to deploy
+2 targets in 2 services
 ```
 
 This is what fills the hole left by not having `terraform plan`. It resolves
@@ -99,9 +99,9 @@ gets.
 ```console
 $ evolve-deploy traffic deploy/prd.yaml
 
-site
-  blue   00000000-0000  27ec167   100%
-  green  00000000-0001  c2a1950     0%
+site        container-app/evolve-prd-site
+  blue     evolve-prd-site--blue-0001               27ec167    100%  <- serving
+  green    evolve-prd-site--green-0002              c2a1950      0%
 ```
 
 With `--to` it puts one label on 100% and the other on 0, by name:

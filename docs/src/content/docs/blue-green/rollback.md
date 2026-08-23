@@ -60,9 +60,9 @@ Without `--to` it is read-only and answers "what is actually running":
 ```console
 $ evolve-deploy traffic deploy/prd.yaml
 
-site
-  blue   site--blue-00001   27ec167   100%
-  green  site--green-0002   c2a1950     0%
+site        container-app/evolve-prd-site
+  blue     evolve-prd-site--blue-0001               27ec167    100%  <- serving
+  green    evolve-prd-site--green-0002              c2a1950      0%
 ```
 
 With `--to` it puts one label on 100% and the other on 0, by name. That is the
