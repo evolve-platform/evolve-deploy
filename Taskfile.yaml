@@ -11,13 +11,22 @@ tasks:
       - go fmt ./...
       - go mod tidy
 
+  # Pinned to the version CI decides the build with. A newer local golangci-lint
+  # is stricter or laxer than the one that has the vote, which turns a green run
+  # here into a red one there. The two --max flags are not cosmetic: by default
+  # the same finding is reported three times at most, so "3 issues" can mean
+  # five, and the next run fails on the two it never showed.
   lint:
     desc: Run the linters
-    cmd: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.6.2 run
+    cmd: >
+      go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run
+      --max-same-issues=0 --max-issues-per-linter=0
 
+  # -race because that is how CI runs them, and a data race that only shows up
+  # there is a race nobody can reproduce.
   test:
     desc: Run all tests
-    cmd: go test ./...
+    cmd: go test -race ./...
 
   coverage:
     desc: Test with a coverage summary
