@@ -136,10 +136,13 @@ func TestDiffEnvComparesReferencesByTarget(t *testing.T) {
 	}
 }
 
-func TestMergeEnvKeepsWhatTheConfigDoesNotMention(t *testing.T) {
-	// Terraform declares the environment on the base task definition and the
-	// config refines it, so a name the config is silent about survives.
-	lits, secs := mergeEnv(
+func TestADeclaredEnvironmentIsTheWholeEnvironment(t *testing.T) {
+	// ECS is the one place the merge could have survived on its own terms: the
+	// base family is Terraform's and re-registered whole, so a variable dropped
+	// there did reach the next release. It goes anyway, because a config that
+	// means the environment on one cloud and a patch over an unseen one on
+	// another is not a config anyone can read.
+	lits, secs := containerEnv(
 		[]ecstypes.KeyValuePair{
 			{Name: awssdk.String("LOG_LEVEL"), Value: awssdk.String("info")},
 			{Name: awssdk.String("CTP_PROJECT_KEY"), Value: awssdk.String("evolve-tst")},
@@ -151,60 +154,112 @@ func TestMergeEnvKeepsWhatTheConfigDoesNotMention(t *testing.T) {
 			{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
 			{Name: "FEATURE_QUOTES", Value: refs.Value{Kind: refs.Literal, Literal: "on"}},
 		},
+		true,
 	)
 
-	want := map[string]string{"LOG_LEVEL": "debug", "CTP_PROJECT_KEY": "evolve-tst", "FEATURE_QUOTES": "on"}
+	want := map[string]string{"LOG_LEVEL": "debug", "FEATURE_QUOTES": "on"}
 	if got := literalMap(lits); !reflect.DeepEqual(got, want) {
 		t.Errorf("literals = %v, want %v", got, want)
 	}
-	if got := secretMap(secs); !reflect.DeepEqual(got, map[string]string{"MOLLIE_API_KEY": "arn:mollie"}) {
-		t.Errorf("secrets = %v, want them untouched", got)
+	// A reference the config stopped naming goes the same way as a literal.
+	// Nothing in ECS distinguishes them once the config is the declaration.
+	if len(secs) != 0 {
+		t.Errorf("secrets = %v, want them gone with the rest", secretMap(secs))
 	}
 }
 
-func TestMergeEnvMovesANameBetweenTheTwoLists(t *testing.T) {
+func TestAVariableThatChangesKindLeavesNothingBehind(t *testing.T) {
 	// ECS keeps literals and references apart and a name may be in only one of
-	// them. A config that turns a literal into a reference has to take it out of
-	// the list it was in, or the task definition declares the same name twice.
-	lits, secs := mergeEnv(
+	// them, so a config that turns a literal into a reference used to have to
+	// take it out of the list it was in by hand. Replacing makes that free:
+	// splitEnv builds both lists from one declaration and cannot put a name in
+	// two of them.
+	lits, secs := containerEnv(
 		[]ecstypes.KeyValuePair{
-			{Name: awssdk.String("LOG_LEVEL"), Value: awssdk.String("info")},
 			{Name: awssdk.String("CTP_CLIENT_SECRET"), Value: awssdk.String("plaintext")},
 		},
-		[]ecstypes.Secret{
-			{Name: awssdk.String("MOLLIE_API_KEY"), ValueFrom: awssdk.String("arn:mollie")},
-		},
+		nil,
 		[]target.EnvVar{
 			{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "arn:ctp"}},
 		},
+		true,
 	)
 
-	if got := literalMap(lits); !reflect.DeepEqual(got, map[string]string{"LOG_LEVEL": "info"}) {
-		t.Errorf("literals = %v, want the one that became a reference taken out", got)
+	if len(lits) != 0 {
+		t.Errorf("literals = %v, want the one that became a reference taken out", literalMap(lits))
 	}
-	want := map[string]string{"MOLLIE_API_KEY": "arn:mollie", "CTP_CLIENT_SECRET": "arn:ctp"}
+	want := map[string]string{"CTP_CLIENT_SECRET": "arn:ctp"}
 	if got := secretMap(secs); !reflect.DeepEqual(got, want) {
 		t.Errorf("secrets = %v, want %v", got, want)
 	}
 }
 
-func TestMergeEnvMovesANameBackToALiteral(t *testing.T) {
-	// The mirror of the move above, which is a separate branch: a reference the
-	// config redeclares as a literal has to leave the secrets list.
-	lits, secs := mergeEnv(
-		[]ecstypes.KeyValuePair{{Name: awssdk.String("LOG_LEVEL"), Value: awssdk.String("info")}},
-		[]ecstypes.Secret{{Name: awssdk.String("CTP_CLIENT_SECRET"), ValueFrom: awssdk.String("arn:ctp")}},
-		[]target.EnvVar{
-			{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Literal, Literal: "plaintext"}},
-		},
-	)
-
-	want := map[string]string{"LOG_LEVEL": "info", "CTP_CLIENT_SECRET": "plaintext"}
-	if got := literalMap(lits); !reflect.DeepEqual(got, want) {
-		t.Errorf("literals = %v, want %v", got, want)
+func TestAConfigDeclaringNoEnvironmentKeepsTheBases(t *testing.T) {
+	// A repository that has not moved its environment here yet. Emptying one
+	// would be a poor way to tell it so.
+	baseLits := []ecstypes.KeyValuePair{
+		{Name: awssdk.String("LOG_LEVEL"), Value: awssdk.String("info")},
 	}
-	if len(secs) != 0 {
-		t.Errorf("secrets = %v, want the name gone from there", secretMap(secs))
+	baseSecs := []ecstypes.Secret{
+		{Name: awssdk.String("MOLLIE_API_KEY"), ValueFrom: awssdk.String("arn:mollie")},
+	}
+
+	lits, secs := containerEnv(baseLits, baseSecs, nil, false)
+
+	if !reflect.DeepEqual(lits, baseLits) || !reflect.DeepEqual(secs, baseSecs) {
+		t.Errorf("environment was not carried over: %v %v", literalMap(lits), secretMap(secs))
+	}
+}
+
+func TestRenderTaskDefLeavesSidecarsAlone(t *testing.T) {
+	// Only the released container is rewritten. Replacing across the whole
+	// definition would empty the collector, whose environment is Terraform's,
+	// and retag an image this tool does not own.
+	base := &ecstypes.TaskDefinition{
+		Cpu:    awssdk.String("512"),
+		Memory: awssdk.String("1024"),
+		ContainerDefinitions: []ecstypes.ContainerDefinition{
+			{
+				Name:  awssdk.String("app"),
+				Image: awssdk.String("1234.dkr.ecr.eu-west-1.amazonaws.com/purchase:old"),
+				Environment: []ecstypes.KeyValuePair{
+					{Name: awssdk.String("STALE"), Value: awssdk.String("yes")},
+				},
+			},
+			{
+				Name:  awssdk.String("collector"),
+				Image: awssdk.String("1234.dkr.ecr.eu-west-1.amazonaws.com/otel:v9"),
+				Environment: []ecstypes.KeyValuePair{
+					{Name: awssdk.String("OTEL_SERVICE_NAME"), Value: awssdk.String("purchase")},
+				},
+			},
+		},
+	}
+
+	out := renderTaskDef(base, "evolve-tst-purchase", "app",
+		"1234.dkr.ecr.eu-west-1.amazonaws.com/purchase:abc1234",
+		[]target.EnvVar{
+			{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
+		}, true)
+
+	app := findContainer(out.ContainerDefinitions, "app")
+	want := map[string]string{"APP_CONFIG_ENDPOINT": "https://store"}
+	if got := literalMap(app.Environment); !reflect.DeepEqual(got, want) {
+		t.Errorf("released container environment = %v, want %v", got, want)
+	}
+
+	sidecar := findContainer(out.ContainerDefinitions, "collector")
+	if got := literalMap(sidecar.Environment); !reflect.DeepEqual(got, map[string]string{"OTEL_SERVICE_NAME": "purchase"}) {
+		t.Errorf("sidecar environment = %v, want it untouched", got)
+	}
+	if awssdk.ToString(sidecar.Image) != "1234.dkr.ecr.eu-west-1.amazonaws.com/otel:v9" {
+		t.Errorf("sidecar image = %q, want it untouched", awssdk.ToString(sidecar.Image))
+	}
+
+	// The base is Terraform's and is read again on the next release, so it must
+	// come out of this unmodified.
+	if got := literalMap(base.ContainerDefinitions[0].Environment); !reflect.DeepEqual(got, map[string]string{"STALE": "yes"}) {
+		t.Errorf("the base definition was modified in place: %v", got)
 	}
 }
 

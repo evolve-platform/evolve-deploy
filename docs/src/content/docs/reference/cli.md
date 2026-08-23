@@ -49,10 +49,6 @@ Roll out the versions named in the config file.
 Nothing is touched until the whole plan resolves, and then until every `before`
 hook has exited zero.
 
-| Flag | |
-|---|---|
-| `--allow-env-removal` | Permit removing environment variables that the config does not declare |
-
 ## `evolve-deploy traffic <config>`
 
 Blue-green only. Without `--to`, read-only: prints which revision each label

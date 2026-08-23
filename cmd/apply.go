@@ -1,17 +1,12 @@
 package cmd
 
 import (
-	"fmt"
-	"strings"
-
 	"github.com/spf13/cobra"
 
 	"github.com/evolve-platform/evolve-deploy/internal/hooks"
 	"github.com/evolve-platform/evolve-deploy/internal/plan"
 	"github.com/evolve-platform/evolve-deploy/internal/ui"
 )
-
-var flagAllowEnvRemoval bool
 
 var applyCmd = &cobra.Command{
 	Use:   "apply <config>",
@@ -50,20 +45,6 @@ release deployed.`,
 			return nil
 		}
 
-		if removals := p.EnvRemovals(); len(removals) > 0 && !flagAllowEnvRemoval {
-			// The guidance goes to the output rather than into the error, so the
-			// error itself stays a single sentence and the explanation stays
-			// readable.
-			fmt.Fprintf(out, "\nWould delete %d environment variable(s):\n  - %s\n\n",
-				len(removals), strings.Join(removals, "\n  - "))
-			fmt.Fprint(out,
-				"The deploy config only ever sets variables, so these are gone from what\n"+
-					"Terraform declares. Put them back there if that was not intended.\n\n")
-			return fmt.Errorf(
-				"refusing to delete %d environment variable(s); pass --allow-env-removal if you meant it",
-				len(removals))
-		}
-
 		return plan.Apply(ctx, p, plan.Options{
 			Driver:      driver,
 			Hooks:       &hooks.Runner{Dir: flagDir, Out: out, Verbose: flagVerbose},
@@ -75,7 +56,5 @@ release deployed.`,
 }
 
 func init() {
-	applyCmd.Flags().BoolVar(&flagAllowEnvRemoval, "allow-env-removal", false,
-		"permit removing environment variables that the config does not declare")
 	RootCmd.AddCommand(applyCmd)
 }

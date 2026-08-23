@@ -391,13 +391,13 @@ type Target struct {
 	// ManagesEnv records whether the config said anything about environment
 	// variables at all.
 	//
-	// The container drivers no longer need it: they lay the config's variables
-	// over the ones already there, and merging an empty set is the no-op that an
-	// image-only deploy wants. What still needs it is the refusal on a function
-	// app, whose app settings hold platform wiring this tool will not own — and
-	// that has to fire on a config that declares an environment, not on one whose
-	// environment happens to resolve to nothing. Deriving it from the merged map
-	// would not tell those apart.
+	// It cannot be derived from the merged map, because the two cases it has to
+	// tell apart both arrive there empty: a config that declares nothing wants an
+	// image-only deploy that leaves the environment alone, and one whose
+	// declaration resolves to nothing — an `envFrom` pointing at an empty object,
+	// say — is asking for an empty environment and gets one. The refusal on a
+	// function app, whose app settings hold platform wiring this tool will not
+	// own, has to fire on the first of those and not the second.
 	ManagesEnv bool `yaml:"-"`
 }
 

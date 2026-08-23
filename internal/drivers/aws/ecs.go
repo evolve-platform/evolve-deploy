@@ -74,7 +74,7 @@ func (d *Driver) planECS(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	desired := renderTaskDef(base, t.Name, name, img, want.Env)
+	desired := renderTaskDef(base, t.Name, name, img, want.Env, want.ManageEnv)
 
 	from := currentImageTag(current, name)
 	ch := &target.Change{
@@ -169,17 +169,13 @@ func (d *Driver) revertECS(ctx context.Context, ch *target.Change) error {
 }
 
 // renderTaskDef copies Terraform's base definition and replaces only what this
-// tool owns: the image tag on one container, and — when the config says
-// anything about environment variables — that container's environment.
-//
-// When it does not, the environment from the base definition is carried over
-// untouched. Writing an empty list instead would delete every variable
-// Terraform set, which is the opposite of what a config that mentions no
-// variables is asking for.
+// tool owns: the image tag on one container, and — when the config declares an
+// environment — that container's environment.
 func renderTaskDef(
 	base *ecstypes.TaskDefinition,
 	family, containerName, image string,
 	env []target.EnvVar,
+	manageEnv bool,
 ) *ecs.RegisterTaskDefinitionInput {
 	containers := make([]ecstypes.ContainerDefinition, len(base.ContainerDefinitions))
 	copy(containers, base.ContainerDefinitions)
@@ -189,8 +185,8 @@ func renderTaskDef(
 			continue
 		}
 		containers[i].Image = awssdk.String(image)
-		containers[i].Environment, containers[i].Secrets = mergeEnv(
-			containers[i].Environment, containers[i].Secrets, env)
+		containers[i].Environment, containers[i].Secrets = containerEnv(
+			containers[i].Environment, containers[i].Secrets, env, manageEnv)
 	}
 
 	// The family is the target name, not the base name: the base family stays
@@ -214,79 +210,38 @@ func renderTaskDef(
 	}
 }
 
-// mergeEnv lays the config's variables over the ones the task definition already
-// carries.
+// containerEnv is the environment the released container carries in the task
+// definition this tool registers.
 //
-// Terraform declares the environment and the deploy config refines it, so a name
-// the config does not mention keeps the value it was given, and there is no flag
-// for "the config said nothing": merging an empty set is already that no-op. The
-// trade is that the config can set a variable but never remove one — removal
-// belongs where the declaration is.
+// The deploy config is the whole declaration, so a name it does not mention is
+// gone. ECS is the one place the merge could have survived on its own terms —
+// the base family is Terraform's and re-registered whole, so a variable dropped
+// there did reach the next release — but a config that means the environment on
+// one cloud and a patch over an unseen one on another is not a config anyone can
+// read. It is also what made the old refusal necessary: a removal here used to
+// mean Terraform had quietly stopped declaring something, and now it means
+// someone edited the deploy file.
 //
-// ECS splits an environment in two, literals from references, and a name can only
-// be in one of them. So a config that turns a literal into a reference has to
-// take it out of the list it was in rather than leave a second definition behind.
-func mergeEnv(
+// A config that declares no environment at all keeps the base's. That is not the
+// same ambiguity: it is a repository that has not moved its environment here yet.
+//
+// Only the released container is passed here, so a sidecar keeps Terraform's.
+//
+// ECS splits an environment in two, literals from references, and a name can
+// only be in one of them. Replacing rather than merging is what makes that free:
+// splitEnv builds the two lists from one declaration, so a variable that turns
+// from a literal into a reference cannot leave a stale twin behind in the list
+// it came from.
+func containerEnv(
 	baseLits []ecstypes.KeyValuePair,
 	baseSecs []ecstypes.Secret,
 	env []target.EnvVar,
+	manage bool,
 ) ([]ecstypes.KeyValuePair, []ecstypes.Secret) {
-	if len(env) == 0 {
+	if !manage {
 		return baseLits, baseSecs
 	}
-	overLits, overSecs := splitEnv(env)
-
-	litByName := make(map[string]ecstypes.KeyValuePair, len(overLits))
-	for _, kv := range overLits {
-		litByName[awssdk.ToString(kv.Name)] = kv
-	}
-	secByName := make(map[string]ecstypes.Secret, len(overSecs))
-	for _, sec := range overSecs {
-		secByName[awssdk.ToString(sec.Name)] = sec
-	}
-
-	lits := make([]ecstypes.KeyValuePair, 0, len(baseLits)+len(overLits))
-	placed := make(map[string]bool, len(overLits))
-	for _, kv := range baseLits {
-		n := awssdk.ToString(kv.Name)
-		if o, ok := litByName[n]; ok {
-			lits = append(lits, o)
-			placed[n] = true
-			continue
-		}
-		if _, ok := secByName[n]; ok {
-			continue
-		}
-		lits = append(lits, kv)
-	}
-	for _, kv := range overLits {
-		if n := awssdk.ToString(kv.Name); !placed[n] {
-			lits = append(lits, kv)
-			placed[n] = true
-		}
-	}
-
-	secs := make([]ecstypes.Secret, 0, len(baseSecs)+len(overSecs))
-	held := make(map[string]bool, len(overSecs))
-	for _, sec := range baseSecs {
-		n := awssdk.ToString(sec.Name)
-		if o, ok := secByName[n]; ok {
-			secs = append(secs, o)
-			held[n] = true
-			continue
-		}
-		if _, ok := litByName[n]; ok {
-			continue
-		}
-		secs = append(secs, sec)
-	}
-	for _, sec := range overSecs {
-		if n := awssdk.ToString(sec.Name); !held[n] {
-			secs = append(secs, sec)
-			held[n] = true
-		}
-	}
-	return lits, secs
+	return splitEnv(env)
 }
 
 // splitEnv separates literals from references. ECS takes literals in
