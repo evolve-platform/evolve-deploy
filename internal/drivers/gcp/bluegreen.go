@@ -646,6 +646,22 @@ func (d *Driver) planServiceBlueGreen(
 			t.Name)
 	}
 
+	// The same argument for the other half of the pair. `bake_time` is the delay
+	// before ECS terminates the old side, and it is ECS that owns that delay —
+	// here the previous revision keeps its tag at zero traffic until the next
+	// release replaces it, so there is no clock to set. Ignoring the setting
+	// would be the worse answer: it is a rollback window someone wrote down, and
+	// silently not having one is exactly what they were trying to avoid.
+	if t.Strategy.Bake() > 0 {
+		return nil, fmt.Errorf(
+			"cloud run service %s: `bake_time` cannot be honoured here.\n"+
+				"    It is the window before ECS terminates the old side, and Cloud Run never\n"+
+				"    terminates one — the previous revision keeps its tag at zero traffic, so\n"+
+				"    `rollback` stays available until the next release takes it. Remove the\n"+
+				"    setting; the window it buys is already open",
+			t.Name)
+	}
+
 	svc, err := d.getService(ctx, t.Name)
 	if err != nil {
 		return nil, err

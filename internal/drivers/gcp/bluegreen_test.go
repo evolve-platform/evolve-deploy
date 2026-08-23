@@ -1,11 +1,13 @@
 package gcp
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"cloud.google.com/go/run/apiv2/runpb"
 
+	"github.com/evolve-platform/evolve-deploy/internal/config"
 	"github.com/evolve-platform/evolve-deploy/internal/refs"
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
@@ -316,4 +318,33 @@ func envOf(tmpl *runpb.RevisionTemplate, container string) map[string]string {
 		out[e.GetName()] = "=" + e.GetValue()
 	}
 	return out
+}
+
+// bake_time is refused rather than ignored. It is the window before ECS
+// terminates the old side, and the setting parsing and validating cleanly on a
+// cloud that never reads it is how a rollback window someone wrote down turns
+// into one they do not have. The refusal is above every API call, so a zero
+// Driver reaches it.
+func TestBakeTimeIsRefusedOnCloudRun(t *testing.T) {
+	want := &target.Desired{
+		Service: "site",
+		Target: &config.Target{
+			Type: config.TypeCloudRun,
+			Name: "site",
+			Strategy: &config.Strategy{
+				Type:     config.StrategyBlueGreen,
+				BakeTime: "10m",
+			},
+		},
+	}
+
+	_, err := (&Driver{}).planServiceBlueGreen(context.Background(), want)
+	if err == nil {
+		t.Fatal("bake_time was accepted on cloud run")
+	}
+	for _, want := range []string{"site", "bake_time", "cannot be honoured"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal does not mention %q: %v", want, err)
+		}
+	}
 }

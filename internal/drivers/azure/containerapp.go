@@ -624,6 +624,21 @@ func parseJSONMap(where, raw string) (map[string]string, error) {
 func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*target.Change, error) {
 	t := want.Target
 
+	// Refused here rather than in config validation, because this is not a
+	// contradiction in what was written — it is one cloud being unable to keep a
+	// promise the config can legitimately make on another. `keep_warm` is the
+	// setting that answers this question here, and having both spellings do
+	// something would make the pair mean two things at once.
+	if t.Strategy.Bake() > 0 {
+		return nil, fmt.Errorf(
+			"container app %s: `bake_time` cannot be honoured here.\n"+
+				"    It is the window before ECS terminates the old side, and nothing here\n"+
+				"    terminates one on a clock — the previous revision is deactivated at the\n"+
+				"    end of the release, or left standing by `keep_warm`. Use `keep_warm` if\n"+
+				"    the old side should stay available to roll back to",
+			t.Name)
+	}
+
 	app, err := d.getApp(ctx, t.Name)
 	if err != nil {
 		return nil, err
