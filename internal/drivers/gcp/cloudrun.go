@@ -53,7 +53,7 @@ func (d *Driver) planService(ctx context.Context, want *target.Desired) (*target
 		return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 	}
 
-	next, from, err := nextTemplate(current, name, want.Version, want.Env)
+	next, from, err := nextTemplate(current, name, want.Version, want.Env, want.ManageEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -145,15 +145,13 @@ func (d *Driver) update(ctx context.Context, name string, tmpl *runpb.RevisionTe
 }
 
 // nextTemplate copies the template and replaces the image tag of one container,
-// and its environment when the config manages one. Sidecars are copied through:
+// and its environment when the config declares one. Sidecars are copied through:
 // their images and settings are Terraform's.
-//
-// With no environment in the config the existing one is carried over untouched:
-// an empty list would delete every variable Terraform set.
 func nextTemplate(
 	current *runpb.RevisionTemplate,
 	name, version string,
 	env []target.EnvVar,
+	manageEnv bool,
 ) (next *runpb.RevisionTemplate, from string, err error) {
 	next = proto.Clone(current).(*runpb.RevisionTemplate)
 
@@ -172,7 +170,7 @@ func nextTemplate(
 		}
 		from = image.Tag(c.GetImage())
 		c.Image = img
-		c.Env = mergeEnv(c.GetEnv(), renderEnv(env))
+		c.Env = containerEnv(c.GetEnv(), renderEnv(env), manageEnv)
 		found = true
 	}
 	if !found {
@@ -181,51 +179,30 @@ func nextTemplate(
 	return next, from, nil
 }
 
-// mergeEnv lays the config's variables over the ones the revision already has.
+// containerEnv is the environment the next revision carries for the container
+// being released.
 //
-// Terraform declares the environment and the deploy config refines it, so a name
-// the config does not mention keeps the value it was given, and there is no flag
-// for "the config said nothing": merging an empty set is already that no-op.
+// The deploy config is the whole declaration, so a name it does not mention is
+// gone. Cloud Run alone could have kept the merge -- a service is Terraform's to
+// correct here, unlike an Azure container whose `env` is on `ignore_changes` --
+// but then the same list of variables would mean the environment on one cloud
+// and a patch over an unseen one on another, and no reader of a deploy file
+// could tell which without knowing where it lands. Configuration that used to
+// arrive by being left on the revision belongs in Secret Manager or a parameter
+// store the service reads for itself.
 //
-// The order follows the base and an unknown name is appended, so a release that
-// changes nothing produces an identical template. The trade is that the config
-// can set a variable but never remove one — removal belongs where the
-// declaration is.
-func mergeEnv(base, over []*runpb.EnvVar) []*runpb.EnvVar {
-	if len(over) == 0 {
-		return base
+// A config that declares no environment at all keeps what is there. That is not
+// the same ambiguity: it is a repository that has not moved its environment here
+// yet, and emptying one would be a poor way to tell it so.
+//
+// Only the released container is touched, so a sidecar's environment stays
+// Terraform's. The side variable is written afterwards by withSide, so replacing
+// here cannot drop it.
+func containerEnv(current, declared []*runpb.EnvVar, manage bool) []*runpb.EnvVar {
+	if !manage {
+		return current
 	}
-
-	byName := make(map[string]*runpb.EnvVar, len(over))
-	appended := make([]string, 0, len(over))
-	for _, e := range over {
-		if e == nil {
-			continue
-		}
-		if _, seen := byName[e.GetName()]; !seen {
-			appended = append(appended, e.GetName())
-		}
-		byName[e.GetName()] = e
-	}
-
-	out := make([]*runpb.EnvVar, 0, len(base)+len(over))
-	for _, e := range base {
-		if e == nil {
-			continue
-		}
-		if o, ok := byName[e.GetName()]; ok {
-			out = append(out, o)
-			delete(byName, e.GetName())
-			continue
-		}
-		out = append(out, e)
-	}
-	for _, n := range appended {
-		if o, ok := byName[n]; ok {
-			out = append(out, o)
-		}
-	}
-	return out
+	return declared
 }
 
 // renderEnv turns the planned environment into Cloud Run variables. A reference

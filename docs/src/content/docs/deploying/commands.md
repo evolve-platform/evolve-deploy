@@ -84,8 +84,9 @@ The tool waits until each target is actually healthy — ECS `services-stable`, 
 Cloud Run ready condition, a Container Apps revision becoming the ready one —
 rather than returning as soon as the API accepted the write.
 
-`--allow-env-removal` is the one flag it adds, and it is covered in
-[Environment variables](../../configuration/environment/#refusing-to-delete).
+It adds no flags of its own. A release that removes environment variables needs
+no confirmation — see [Environment
+variables](../../configuration/environment/#removals).
 
 ## `traffic`
 

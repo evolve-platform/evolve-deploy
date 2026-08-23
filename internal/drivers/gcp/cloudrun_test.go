@@ -45,7 +45,7 @@ func TestTheUnnamedContainerIsFound(t *testing.T) {
 
 	next, from, err := nextTemplate(current, name, "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestRevisionNameIsCleared(t *testing.T) {
 	// makes Cloud Run reject the update.
 	current := template("purchase-00007-abc", &runpb.Container{Image: "repo/purchase:old"})
 
-	next, _, err := nextTemplate(current, "", "abc1234", nil)
+	next, _, err := nextTemplate(current, "", "abc1234", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 
 	next, _, err := nextTemplate(current, "app", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,5 +167,100 @@ func TestDiffEnvIgnoresRotations(t *testing.T) {
 		if name == "CTP_CLIENT_SECRET" {
 			t.Error("an unchanged reference was reported as changed")
 		}
+	}
+}
+
+func TestADeclaredEnvironmentIsTheWholeEnvironment(t *testing.T) {
+	// Cloud Run alone could have kept the merge -- the service is Terraform's to
+	// correct, unlike an Azure container whose env is on ignore_changes. It does
+	// not, because the same list of variables meaning the environment on one
+	// cloud and a patch over an unseen one on another is not something a reader
+	// of a deploy file can be asked to keep track of.
+	current := template("purchase-00007-abc", &runpb.Container{
+		Name:  "app",
+		Image: "repo/purchase:old",
+		Env: []*runpb.EnvVar{
+			literal("LOG_LEVEL", "info"),
+			literal("CTP_PROJECT_KEY", "evolve-tst"),
+			secretRef("CTP_CLIENT_SECRET", "ctp-client-secret"),
+		},
+	})
+
+	next, _, err := nextTemplate(current, "app", "abc1234", []target.EnvVar{
+		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
+		{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := envFingerprint(findContainer(next.GetContainers(), "app").GetEnv(), nil)
+	want := map[string]string{
+		"LOG_LEVEL":           "=debug",
+		"APP_CONFIG_ENDPOINT": "=https://store",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("environment = %v, want %v", got, want)
+	}
+}
+
+func TestAConfigDeclaringNoEnvironmentKeepsWhatIsThere(t *testing.T) {
+	// A repository that has not moved its environment here yet. Emptying one
+	// would be a poor way to tell it so.
+	current := template("purchase-00007-abc", &runpb.Container{
+		Name:  "app",
+		Image: "repo/purchase:old",
+		Env: []*runpb.EnvVar{
+			literal("LOG_LEVEL", "info"),
+			secretRef("CTP_CLIENT_SECRET", "ctp-client-secret"),
+		},
+	})
+
+	next, _, err := nextTemplate(current, "app", "abc1234", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := envFingerprint(findContainer(next.GetContainers(), "app").GetEnv(), nil)
+	want := map[string]string{
+		"LOG_LEVEL":         "=info",
+		"CTP_CLIENT_SECRET": "->ctp-client-secret",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("environment = %v, want %v", got, want)
+	}
+}
+
+func TestASidecarKeepsItsEnvironmentWhenTheConfigDeclaresOne(t *testing.T) {
+	// Only the released container is rewritten. Replacing across the template
+	// would empty the collector, whose environment is Terraform's.
+	current := template("r1",
+		&runpb.Container{
+			Name:  "app",
+			Image: "repo/purchase:old",
+			Env:   []*runpb.EnvVar{literal("STALE", "yes")},
+		},
+		&runpb.Container{
+			Name:  "collector",
+			Image: "repo/otel:v9",
+			Env:   []*runpb.EnvVar{literal("OTEL_SERVICE_NAME", "purchase")},
+		},
+	)
+
+	next, _, err := nextTemplate(current, "app", "abc1234", []target.EnvVar{
+		{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar := envFingerprint(findContainer(next.GetContainers(), "collector").GetEnv(), nil)
+	if want := map[string]string{"OTEL_SERVICE_NAME": "=purchase"}; !reflect.DeepEqual(sidecar, want) {
+		t.Errorf("sidecar environment = %v, want %v", sidecar, want)
+	}
+
+	app := envFingerprint(findContainer(next.GetContainers(), "app").GetEnv(), nil)
+	if want := map[string]string{"APP_CONFIG_ENDPOINT": "=https://store"}; !reflect.DeepEqual(app, want) {
+		t.Errorf("released container environment = %v, want %v", app, want)
 	}
 }

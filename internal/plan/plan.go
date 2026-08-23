@@ -70,27 +70,6 @@ type ServicePlan struct {
 // BlueGreen reports whether this service stages a side and switches to it.
 func (c *ServicePlan) BlueGreen() bool { return c.Side != "" }
 
-// EnvRemovals lists every environment variable this plan would delete, as
-// "target: NAME".
-//
-// The config cannot cause one: it lays its variables over what is already there
-// and never removes. So a removal means the variable is gone from what Terraform
-// declares, and the next release is what carries that into a running service —
-// which is worth confirming, secrets being among the things that disappear this
-// way.
-func (p *Plan) EnvRemovals() []string {
-	var out []string
-	for _, cp := range p.Services {
-		for _, ch := range cp.Changes {
-			for _, name := range ch.EnvRemoved {
-				out = append(out, fmt.Sprintf("%s: %s", ch.Target.Label(), name))
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // SmokeHooks gate the release. They run once, after everything has staged
 // and before anything switches.
 //

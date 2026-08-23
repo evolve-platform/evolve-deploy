@@ -49,11 +49,12 @@ type Desired struct {
 
 	// ManageEnv reports whether the config declared an environment at all.
 	//
-	// It is not what decides whether Env is written: the container drivers merge
-	// it over what the container already carries, so a config that declares
-	// nothing changes nothing without being asked. It is here for the drivers
-	// that cannot honour an environment at all and have to refuse one — a
-	// function app, whose settings are half platform wiring.
+	// It is the difference between the two ways of using the tool, so the
+	// container drivers cannot infer it from Env: a declaration that resolves to
+	// nothing means empty the environment, and no declaration means leave it
+	// alone, and both arrive here as an empty Env. It also tells the drivers that
+	// cannot honour an environment at all to refuse one — a function app, whose
+	// settings are half platform wiring.
 	ManageEnv bool
 
 	// SideEnv is the resolved per-side environment, keyed by label. Written on

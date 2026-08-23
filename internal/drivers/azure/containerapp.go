@@ -108,7 +108,7 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	next, from, err := nextContainers(current, name, want.Version, want.Env)
+	next, from, err := nextContainers(current, name, want.Version, want.Env, want.ManageEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -414,15 +414,13 @@ func describeReplicas(replicas []*armappcontainers.Replica) (detail string, cras
 }
 
 // nextContainers copies the template and replaces the image tag of one
-// container, and its environment when the config manages one. It returns the
+// container, and its environment when the config declares one. It returns the
 // version that was running, read back from the image tag.
-//
-// With no environment in the config the existing one is carried over untouched:
-// an empty list would delete every variable Terraform set.
 func nextContainers(
 	current []*armappcontainers.Container,
 	name, version string,
 	env []target.EnvVar,
+	manageEnv bool,
 ) (next []*armappcontainers.Container, from string, err error) {
 	next = make([]*armappcontainers.Container, 0, len(current))
 	for _, c := range current {
@@ -443,7 +441,7 @@ func nextContainers(
 
 		replaced := *c
 		replaced.Image = to.Ptr(img)
-		replaced.Env = mergeEnv(c.Env, renderEnv(env))
+		replaced.Env = containerEnv(c.Env, renderEnv(env), manageEnv)
 		next = append(next, &replaced)
 	}
 
@@ -570,7 +568,7 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 		return nil, err
 	}
 
-	next, from, err := nextContainers(base, name, want.Version, want.Env)
+	next, from, err := nextContainers(base, name, want.Version, want.Env, want.ManageEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -620,58 +618,34 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 	}, nil
 }
 
-// mergeEnv lays the config's variables over the ones the container already has.
+// containerEnv is the environment the next revision carries for the container
+// being released.
 //
-// Terraform declares the environment and the deploy config refines it, so a name
-// the config does not mention keeps the value it was given. This is why there is
-// no flag for "the config said nothing": merging an empty set is already the
-// no-op that case wants.
+// The deploy config is the whole declaration, so a name it does not mention is
+// gone. Laying the config over what was already there instead could never remove
+// anything -- and on Azure nothing else can either, because `env` is on the
+// container module's `ignore_changes`: Terraform writes one at create and can
+// never correct it. A variable set once therefore outlived every release and went
+// on outranking whatever was meant to replace it, which is a silent way to serve
+// a value nobody can find the source of. Configuration that used to arrive that
+// way belongs in App Configuration or Parameter Store, where the service reads it
+// for itself.
 //
-// The order follows the base and a name the base does not carry is appended, so
-// a release that changes nothing writes an identical list — which matters,
-// because a template that differs is a revision ARM has to create.
+// A config that declares no environment at all keeps what is there. That is not
+// the same ambiguity: it is a repository that has not moved its environment here
+// yet, and emptying one would be a poor way to tell it so.
 //
-// The trade is that the config can set a variable but never remove one. That is
-// deliberate: removal belongs where the declaration is.
-func mergeEnv(
-	base, over []*armappcontainers.EnvironmentVar,
+// Only the released container is passed here, so a sidecar's environment stays
+// Terraform's. The side variable is written afterwards by withSide, so replacing
+// here cannot drop it.
+func containerEnv(
+	current, declared []*armappcontainers.EnvironmentVar,
+	manage bool,
 ) []*armappcontainers.EnvironmentVar {
-	if len(over) == 0 {
-		return base
+	if !manage {
+		return current
 	}
-
-	byName := make(map[string]*armappcontainers.EnvironmentVar, len(over))
-	appended := make([]string, 0, len(over))
-	for _, e := range over {
-		if e == nil {
-			continue
-		}
-		n := derefString(e.Name)
-		if _, seen := byName[n]; !seen {
-			appended = append(appended, n)
-		}
-		byName[n] = e
-	}
-
-	out := make([]*armappcontainers.EnvironmentVar, 0, len(base)+len(over))
-	for _, e := range base {
-		if e == nil {
-			continue
-		}
-		n := derefString(e.Name)
-		if o, ok := byName[n]; ok {
-			out = append(out, o)
-			delete(byName, n)
-			continue
-		}
-		out = append(out, e)
-	}
-	for _, n := range appended {
-		if o, ok := byName[n]; ok {
-			out = append(out, o)
-		}
-	}
-	return out
+	return declared
 }
 
 // withSide writes the side, and the side's own variables, into the application

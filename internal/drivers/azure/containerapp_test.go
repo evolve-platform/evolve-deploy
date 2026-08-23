@@ -41,7 +41,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 
 	next, from, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestDiffContainersIgnoresSidecarsAndRotations(t *testing.T) {
 
 func TestNextContainersRefusesAnUntaggedImage(t *testing.T) {
 	_, _, err := nextContainers(
-		[]*armappcontainers.Container{container("main", "")}, "main", "abc", nil)
+		[]*armappcontainers.Container{container("main", "")}, "main", "abc", nil, false)
 	if err == nil {
 		t.Fatal("an image with no repository was accepted")
 	}
@@ -167,7 +167,7 @@ func TestAnAbsentEnvConfigLeavesTheEnvironmentAlone(t *testing.T) {
 			secretRef("CTP_CLIENT_SECRET", "ctp-client-secret")),
 	}
 
-	next, _, err := nextContainers(current, "main", "abc1234", nil)
+	next, _, err := nextContainers(current, "main", "abc1234", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,11 +327,12 @@ func TestAHealthyRevisionHasNothingToDescribe(t *testing.T) {
 	}
 }
 
-func TestConfigVariablesLayOverTerraformsRatherThanReplacingThem(t *testing.T) {
-	// Terraform declares the environment and the config refines it. A name the
-	// config does not mention keeps the value Terraform gave it — replacing the
-	// list instead would strip everything the config does not repeat, which is
-	// most of it.
+func TestADeclaredEnvironmentIsTheWholeEnvironment(t *testing.T) {
+	// The config is the declaration, so a name it does not mention is gone.
+	// Laying it over what was there instead could never remove anything, and on
+	// Azure nothing else can either -- Terraform has `env` on ignore_changes, so a
+	// variable it wrote at create outlived every release and went on outranking
+	// whatever was meant to replace it.
 	current := []*armappcontainers.Container{
 		container("main", "reg/purchase:old",
 			literal("LOG_LEVEL", "info"),
@@ -342,17 +343,15 @@ func TestConfigVariablesLayOverTerraformsRatherThanReplacingThem(t *testing.T) {
 	next, _, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
 		{Name: "FEATURE_QUOTES", Value: refs.Value{Kind: refs.Literal, Literal: "on"}},
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	got := envFingerprint(findContainer(next, "main").Env, nil)
 	want := map[string]string{
-		"LOG_LEVEL":         "=debug",
-		"CTP_PROJECT_KEY":   "=evolve-tst",
-		"CTP_CLIENT_SECRET": "->ctp-client-secret",
-		"FEATURE_QUOTES":    "=on",
+		"LOG_LEVEL":      "=debug",
+		"FEATURE_QUOTES": "=on",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("environment = %v, want %v", got, want)
@@ -369,7 +368,7 @@ func TestAVariableThatChangesKindLeavesNothingBehind(t *testing.T) {
 
 	next, _, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
 		{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "ctp-client-secret"}},
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +394,7 @@ func TestTheConfigCannotRemoveAVariable(t *testing.T) {
 		container("main", "reg/purchase:old", literal("LOG_LEVEL", "info")),
 	}
 
-	next, _, err := nextContainers(current, "main", "abc1234", nil)
+	next, _, err := nextContainers(current, "main", "abc1234", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,13 +403,13 @@ func TestTheConfigCannotRemoveAVariable(t *testing.T) {
 	}
 }
 
-func TestMergingTheSameConfigTwiceWritesTheSameList(t *testing.T) {
+func TestTheSameConfigTwiceWritesTheSameList(t *testing.T) {
 	// A template that differs is a revision ARM has to create, so the order has
-	// to come from the base and the config rather than from map iteration.
+	// to be stable across runs.
 	base := []*armappcontainers.EnvironmentVar{
 		literal("A", "1"), literal("B", "2"), secretRef("C", "c"),
 	}
-	over := renderEnv([]target.EnvVar{
+	declared := renderEnv([]target.EnvVar{
 		{Name: "B", Value: refs.Value{Kind: refs.Literal, Literal: "two"}},
 		{Name: "Z", Value: refs.Value{Kind: refs.Literal, Literal: "z"}},
 		{Name: "Y", Value: refs.Value{Kind: refs.Literal, Literal: "y"}},
@@ -418,7 +417,7 @@ func TestMergingTheSameConfigTwiceWritesTheSameList(t *testing.T) {
 
 	var first []string
 	for i := 0; i < 5; i++ {
-		got := mergeEnv(base, over)
+		got := containerEnv(base, declared, true)
 		names := make([]string, 0, len(got))
 		for _, e := range got {
 			names = append(names, derefString(e.Name))
@@ -431,7 +430,80 @@ func TestMergingTheSameConfigTwiceWritesTheSameList(t *testing.T) {
 			t.Fatalf("order changed between runs: %v then %v", first, names)
 		}
 	}
-	if want := []string{"A", "B", "C", "Z", "Y"}; !reflect.DeepEqual(first, want) {
+	if want := []string{"B", "Z", "Y"}; !reflect.DeepEqual(first, want) {
 		t.Errorf("names = %v, want %v", first, want)
+	}
+}
+
+func TestADeclaredEnvironmentRemovesWhatItDoesNotName(t *testing.T) {
+	// The reason this changed: nothing else can remove a variable. Terraform has
+	// `env` on ignore_changes, so one it wrote at create outlived every release
+	// and went on outranking whatever was meant to replace it.
+	base := []*armappcontainers.EnvironmentVar{
+		literal("CTP_API_URL", "https://old.example"),
+		secretRef("CTP_CLIENT_SECRET", "ctp-client-secret"),
+	}
+	declared := renderEnv([]target.EnvVar{
+		{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
+	})
+
+	got := containerEnv(base, declared, true)
+
+	names := make([]string, 0, len(got))
+	for _, e := range got {
+		names = append(names, derefString(e.Name))
+	}
+	if want := []string{"APP_CONFIG_ENDPOINT"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("names = %v, want %v", names, want)
+	}
+}
+
+func TestAConfigDeclaringNoEnvironmentKeepsWhatIsThere(t *testing.T) {
+	// A repository that has not moved its environment here yet. Emptying one
+	// would be a poor way to tell it so.
+	base := []*armappcontainers.EnvironmentVar{literal("A", "1"), secretRef("B", "b")}
+
+	got := containerEnv(base, nil, false)
+
+	if !reflect.DeepEqual(got, base) {
+		t.Errorf("environment was not carried over: %v", got)
+	}
+}
+
+func TestASidecarKeepsItsOwnEnvironment(t *testing.T) {
+	// A sidecar's image and environment are Terraform's. The gateway runs one, so
+	// replacing across the whole template would empty the reverse proxy.
+	current := []*armappcontainers.Container{
+		{
+			Name:  to.Ptr("main"),
+			Image: to.Ptr("registry.example/app:old"),
+			Env:   []*armappcontainers.EnvironmentVar{literal("STALE", "yes")},
+		},
+		{
+			Name:  to.Ptr("reverse-proxy"),
+			Image: to.Ptr("registry.example/proxy:pinned"),
+			Env:   []*armappcontainers.EnvironmentVar{literal("OTEL_SERVICE_NAME", "proxy")},
+		},
+	}
+	declared := []target.EnvVar{
+		{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
+	}
+
+	next, _, err := nextContainers(current, "main", "new", declared, true)
+	if err != nil {
+		t.Fatalf("nextContainers: %v", err)
+	}
+
+	proxy := findContainer(next, "reverse-proxy")
+	if proxy == nil || len(proxy.Env) != 1 || derefString(proxy.Env[0].Name) != "OTEL_SERVICE_NAME" {
+		t.Errorf("sidecar environment was rewritten: %+v", proxy)
+	}
+	if derefString(proxy.Image) != "registry.example/proxy:pinned" {
+		t.Errorf("sidecar image was retagged: %s", derefString(proxy.Image))
+	}
+
+	main := findContainer(next, "main")
+	if main == nil || len(main.Env) != 1 || derefString(main.Env[0].Name) != "APP_CONFIG_ENDPOINT" {
+		t.Errorf("released container env = %+v, want only APP_CONFIG_ENDPOINT", main)
 	}
 }

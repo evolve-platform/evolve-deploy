@@ -26,7 +26,11 @@ lifecycle { ignore_changes = [s3_key] }
 ```
 
 Add the environment to that list once a service's [`env`](../../configuration/environment/)
-moves into the deploy config:
+moves into the deploy config — and stop declaring it here at all. The config is
+the whole environment from that point, so the first release replaces whatever
+Terraform wrote; a declaration left behind is not a fallback, it is a second
+answer to a question that now has one. Anything that used to live here and is not
+in the deploy config belongs in a parameter store the service reads for itself.
 
 ```hcl
 lifecycle {
@@ -74,6 +78,14 @@ resource "aws_ecs_service" "purchase" {
 
 A memory change in Terraform then lands on the next deploy, and Terraform can
 never roll the image back.
+
+The same goes for the environment as everywhere else: once a service declares
+[`env`](../../configuration/environment/), take those variables out of the
+released container's definition in the base. There is no `ignore_changes` to add
+here — the tool simply replaces that container's `environment` and `secrets` with
+what the config declares, so anything left in the base is a second answer that
+never wins. Everything else in the base is still read and carried through: cpu,
+memory, probes, log configuration, and the sidecars with their own environments.
 
 Override the family name with `base:` on the service or target if `<name>-base`
 is not your convention.
