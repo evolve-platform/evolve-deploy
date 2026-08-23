@@ -1,3 +1,0 @@
-kind: Changed
-body: 'Staging hangs the idle label on the new revision while it waits for that revision to run, instead of afterwards. Neither needs the other — the label is written at weight zero and the smoke test that uses its URL does not run until staging has returned — so doing them in sequence spent a whole Container Apps update after the container was already up. Staging now costs the slower of the two rather than the sum.'
-time: 2026-08-22T11:40:00.000000000+02:00
