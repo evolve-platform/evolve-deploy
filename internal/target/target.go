@@ -88,6 +88,17 @@ type Change struct {
 	// the plan can say what a rollback would find without holding a driver.
 	Fallback string
 
+	// PublicURL is the address this target keeps after the release, read while
+	// planning from what Terraform declared — an ingress hostname, a service
+	// URI. Empty where the platform gives the target no address at all: a job
+	// and a function have no ingress to name.
+	//
+	// The loosest of the three addresses a release has, and the only one known
+	// before anything is staged: it follows the traffic weights, so it means the
+	// old version until the switch and the new one after it. See Staged for the
+	// other two.
+	PublicURL string
+
 	// Carry marks a target that is staged only to keep the side complete:
 	// nothing about it changed, and it is here because the side is a property of
 	// the environment rather than of one service. A side missing an app is not a
@@ -210,12 +221,29 @@ type Sides struct {
 
 // Staged is where a newly created revision can be reached, before it serves
 // anything.
+//
+// The two addresses here are the tighter two of the three a release has, and
+// they differ in what they are pinned to. URL follows the label, so it names
+// whatever this side holds and will name something else after the next release.
+// RevisionURL follows nothing: it is one revision's own address and stays that
+// forever. Change.PublicURL is the third and follows the traffic.
 type Staged struct {
 	Label    string
 	Revision string
 	// URL is the label's own address. It is what makes a smoke test possible at
 	// all: a revision with no traffic is still reachable there.
 	URL string
+
+	// RevisionURL is the staged revision's own address, empty on a platform
+	// where a revision has none.
+	//
+	// Only Container Apps gives every revision one. A Cloud Run revision is
+	// reachable through a tag and not otherwise, and on ECS a task set has no
+	// address at all — there is a listener rule in front of it, which is what
+	// URL is there. So this is the one address that is genuinely absent on two
+	// of the three, and naming it there is a refusal rather than a fallback to
+	// the label's.
+	RevisionURL string
 }
 
 // Rollout is implemented by drivers that can route traffic by label.

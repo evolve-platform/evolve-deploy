@@ -264,6 +264,43 @@ func labelURL(fqdn, label string) string {
 	return "https://" + host + "---" + label + "." + domain
 }
 
+// appFQDN is the app's own ingress hostname, empty when it has none: an
+// internal worker is a container app too, and nothing reaches it by name.
+func appFQDN(app *armappcontainers.ContainerApp) string {
+	cfg := app.Properties.Configuration
+	if cfg == nil || cfg.Ingress == nil {
+		return ""
+	}
+	return derefString(cfg.Ingress.Fqdn)
+}
+
+// appURL is the address the app keeps across releases, as opposed to labelURL's,
+// which belongs to whichever side happens to hold the label today.
+func appURL(fqdn string) string {
+	if fqdn == "" {
+		return ""
+	}
+	return "https://" + fqdn
+}
+
+// revisionURL is one revision's own address, which nothing ever re-points.
+//
+// Assembled from the app's hostname for the same reason labelURL is: the value
+// is on RevisionProperties, but only after a read of the revision, and the
+// caller here already knows both halves. A revision is named app--suffix and
+// answers on app--suffix.<domain>, so the app's own domain is the whole of what
+// is missing.
+func revisionURL(fqdn, revision string) string {
+	if fqdn == "" || revision == "" {
+		return ""
+	}
+	_, domain, ok := strings.Cut(fqdn, ".")
+	if !ok {
+		return ""
+	}
+	return "https://" + revision + "." + domain
+}
+
 // getApp reads an app and checks the parts every caller needs are present.
 func (d *Driver) getApp(ctx context.Context, name string) (*armappcontainers.ContainerApp, error) {
 	timer := logging.Start("get container app", "name", name)
@@ -388,9 +425,10 @@ func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, 
 	timer.Done("revision", staged)
 
 	return &target.Staged{
-		Label:    ch.Sides.Idle.Label,
-		Revision: staged,
-		URL:      labelURL(p.fqdn, ch.Sides.Idle.Label),
+		Label:       ch.Sides.Idle.Label,
+		Revision:    staged,
+		URL:         labelURL(p.fqdn, ch.Sides.Idle.Label),
+		RevisionURL: revisionURL(p.fqdn, staged),
 	}, nil
 }
 

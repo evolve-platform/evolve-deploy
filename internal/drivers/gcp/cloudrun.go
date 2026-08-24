@@ -72,6 +72,7 @@ func (d *Driver) planService(ctx context.Context, want *target.Desired) (*target
 		EnvAdded:    added,
 		EnvChanged:  changed,
 		EnvRemoved:  removed,
+		PublicURL:   svc.GetUri(),
 		Payload:     &payload{template: next, previous: current, etag: svc.GetEtag()},
 	}, nil
 }

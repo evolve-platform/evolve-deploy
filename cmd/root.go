@@ -129,7 +129,10 @@ func loadConfig(path string) (*config.File, error) {
 func hookVars(pairs []string) (map[string]string, error) {
 	// Shadowing one of these would mean a hook silently receiving a different
 	// version than the one being deployed, which is not worth being able to do.
-	reserved := []string{"version", "name", "env", "label", "previous_label", "url", "revision"}
+	reserved := []string{
+		"version", "name", "env", "label", "previous_label",
+		"url", "url_stage", "url_revision", "url_public", "revision",
+	}
 
 	out := map[string]string{}
 	for _, pair := range pairs {

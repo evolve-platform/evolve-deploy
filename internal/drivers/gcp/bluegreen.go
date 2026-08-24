@@ -721,6 +721,7 @@ func (d *Driver) planServiceBlueGreen(
 		EnvRemoved:  removed,
 		Sides:       sides,
 		Carry:       carry,
+		PublicURL:   svc.GetUri(),
 		Payload:     &bgPayload{template: next, traffic: svc.GetTraffic()},
 	}, nil
 }

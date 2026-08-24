@@ -67,7 +67,18 @@ func (d *fakeDriver) Plan(_ context.Context, want *target.Desired) (*target.Chan
 		FromVersion: from,
 		ToVersion:   want.Version,
 		Reason:      "version changed",
+		PublicURL:   fakePublicURL(want.Target),
 	}, nil
+}
+
+// fakePublicURL mirrors what the real drivers report: what serves requests has
+// an address of its own, and a rider beside it has none.
+func fakePublicURL(t *config.Target) string {
+	switch t.Type {
+	case config.TypeLambda, config.TypeContainerJob, config.TypeFunctionApp:
+		return ""
+	}
+	return "https://" + t.Name + ".example"
 }
 
 func (d *fakeDriver) Apply(_ context.Context, ch *target.Change) error {

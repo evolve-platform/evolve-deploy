@@ -95,17 +95,18 @@ strategy:
   type: blue-green
   smoke:
     - uses: http
-      with: { url: '{{url "purchase"}}/healthz', retry: 5, delay: 2s }
+      with: { url: '{{url_stage "purchase"}}/healthz', retry: 5, delay: 2s }
     - uses: http
-      with: { url: '{{url "discover"}}/healthz', retry: 5, delay: 2s }
+      with: { url: '{{url_stage "discover"}}/healthz', retry: 5, delay: 2s }
     # The one worth more than the sum of those: a request through the staged
     # side, end to end.
-    - npm run smoke -- --base-url {{url "site"}}
+    - npm run smoke -- --base-url {{url_stage "site"}}
 ```
 
 | | |
 |---|---|
-| `{{url "site"}}` | the staged side's address for that service |
+| `{{url_stage "site"}}` | the staged side's address for that service |
+| `{{url_revision "site"}}` | the staged revision's own address |
 | `{{label "site"}}` | which side it staged on |
 | `{{revision "site"}}` | the revision that was staged |
 
@@ -137,3 +138,10 @@ Check against what is serving now; publish to the side this is going to.
 
 On a `direct` service these are **absent rather than empty**, so a hook naming
 one fails loudly instead of publishing to `tst-`.
+
+For an address, a hook has `{{url "purchase"}}`: what the target keeps once the
+release is over, rather than the side it was staged on. It is the one a
+registration wants — a subgraph URL or a webhook is read by something else, long
+after the labels have swapped again. `{{url_stage}}` and `{{url_revision}}` are
+refused here rather than resolving to an address that stops meaning this release
+on the next one.
