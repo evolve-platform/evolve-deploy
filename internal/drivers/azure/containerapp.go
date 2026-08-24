@@ -43,7 +43,8 @@ const readyTimeout = 10 * time.Minute
 const revertTimeout = 2 * time.Minute
 
 // pollInterval is how often the app and its newest revision are read while
-// waiting.
+// waiting. It is the default for Driver.poll, which is what the waits actually
+// read: a test of a wait cannot afford five seconds a poll.
 const pollInterval = 5 * time.Second
 
 // unhealthyStrikes is how many consecutive polls must call the revision
@@ -276,7 +277,7 @@ func (d *Driver) waitReady(ctx context.Context, name string, timeout time.Durati
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(pollInterval):
+		case <-time.After(d.poll):
 		}
 	}
 }
