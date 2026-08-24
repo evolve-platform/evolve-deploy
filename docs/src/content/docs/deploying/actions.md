@@ -95,7 +95,7 @@ Asks for one url and says whether the answer was the expected one.
 strategy:
   smoke:
     - uses: http
-      with: { url: '{{url "site"}}/healthz', retry: 5, delay: 2s }
+      with: { url: '{{url_stage "site"}}/healthz', retry: 5, delay: 2s }
 ```
 
 | Option | | Default |
@@ -128,7 +128,7 @@ point of it.
 
 ```yaml
 smoke:
-  - npm run smoke -- --base-url {{url "site"}}
+  - npm run smoke -- --base-url {{url_stage "site"}}
 ```
 
 The tool has no opinion about your test suite and does not want one.

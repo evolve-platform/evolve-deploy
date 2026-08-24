@@ -124,9 +124,16 @@ The options for each action are on the [Actions](../../deploying/actions/) page.
 | `{{.env}}` | hooks | The environment name |
 | `{{.label}}` | blue-green hooks | The side this release is going to |
 | `{{.previous_label}}` | blue-green hooks | The side that was serving |
-| `{{url "svc"}}` | `strategy.smoke` | The staged side's address for that service |
+| `{{url "svc"}}` | hooks | The address that target keeps after the release |
+| `{{url_public "svc"}}` | hooks, `strategy.smoke` | The same address, spelled out |
+| `{{url_stage "svc"}}` | `strategy.smoke` | The staged side's address |
+| `{{url_revision "svc"}}` | `strategy.smoke` | The staged revision's own address |
 | `{{label "svc"}}` | `strategy.smoke` | Which side it staged on |
 | `{{revision "svc"}}` | `strategy.smoke` | The revision that was staged |
+
+Three addresses, told apart by what re-points them: a revision never, a side when
+you stage, the public one when you switch. The staged two are refused in a hook
+and bare `url` is refused in `strategy.smoke`, where it used to mean the side.
 
 See [Templating](../../configuration/templating/).
 

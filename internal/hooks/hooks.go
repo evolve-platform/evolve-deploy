@@ -63,11 +63,17 @@ type Vars map[string]string
 // Run executes the hooks of one service in order and stops at the first
 // failure. Everything they print is tagged with the service name.
 func (r *Runner) Run(ctx context.Context, service, phase string, hooks []*Hook, vars Vars) error {
-	data := make(map[string]any, len(vars))
-	for k, v := range vars {
-		data[k] = v
+	return r.RunWith(ctx, service, phase, hooks, vars.Data(), nil)
+}
+
+// Data is Vars as RunWith and ValidateWith take it, for a hook that is given
+// functions as well as variables.
+func (v Vars) Data() map[string]any {
+	d := make(map[string]any, len(v))
+	for k, val := range v {
+		d[k] = val
 	}
-	return r.RunWith(ctx, service, phase, hooks, data, nil)
+	return d
 }
 
 // RunWith is Run for hooks whose variables are not flat strings.
@@ -214,11 +220,7 @@ func (w *prefixWriter) flush() {
 // red pipeline, so the rendering is checked during planning, where every other
 // findable failure is found.
 func Validate(hooks []*Hook, vars Vars) error {
-	data := make(map[string]any, len(vars))
-	for k, v := range vars {
-		data[k] = v
-	}
-	return ValidateWith(hooks, data, nil)
+	return ValidateWith(hooks, vars.Data(), nil)
 }
 
 // ValidateWith is Validate for the nested data a release-wide smoke test uses.

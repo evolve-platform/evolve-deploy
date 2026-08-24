@@ -72,7 +72,7 @@ No Lambda and no appspec: the exit code of a shell command still decides.
 strategy:
   type: blue-green
   bake_time: 10m        # ECS only: the window before the old side is terminated
-  smoke: [ 'curl -fsS {{url "site"}}/healthz' ]
+  smoke: [ 'curl -fsS {{url_stage "site"}}/healthz' ]
 
 services:
   site:

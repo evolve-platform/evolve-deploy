@@ -122,6 +122,7 @@ func (d *rolloutDriver) Plan(ctx context.Context, want *target.Desired) (*target
 	if staged {
 		ch.Sides = d.sidesOf(want.Target.Name)
 	}
+	ch.PublicURL = fakePublicURL(want.Target)
 	return ch, nil
 }
 
@@ -135,6 +136,10 @@ func (d *rolloutDriver) Stage(_ context.Context, ch *target.Change) (*target.Sta
 		Label:    ch.Sides.Idle.Label,
 		Revision: "new-rev",
 		URL:      "https://" + ch.Target.Name + "---" + ch.Sides.Idle.Label + ".example",
+		// Only Container Apps gives a revision an address of its own, so the
+		// fake gives one to ecs and not to the rest — otherwise the refusal for
+		// a platform that has none would never be exercised.
+		RevisionURL: revisionAddress(ch.Target),
 	}, nil
 }
 
@@ -528,13 +533,13 @@ services:
 
 	// Only the plan is built: no url exists yet, and running it would need one.
 	if _, err := Build(context.Background(),
-		load(t, body(`curl -fsS {{url "site"}}/healthz # {{revision "site"}}`)),
+		load(t, body(`curl -fsS {{url_stage "site"}}/healthz # {{revision "site"}}`)),
 		newRolloutDriver(), nil); err != nil {
 		t.Fatalf("a name this release stages should be accepted: %v", err)
 	}
 
 	_, err := Build(context.Background(),
-		load(t, body(`curl {{url "sight"}}`)), newRolloutDriver(), nil)
+		load(t, body(`curl {{url_stage "sight"}}`)), newRolloutDriver(), nil)
 	if err == nil {
 		t.Fatal("a name that stages nothing should fail the plan")
 	}
@@ -625,9 +630,9 @@ services:
 	}
 }
 
-// url resolves to the staged side, and a name that staged nothing is an error
-// rather than an empty string — a gate pointed at "" would pass.
-func TestSmokeUrlResolvesToTheStagedSide(t *testing.T) {
+// url_stage resolves to the staged side, and a name that staged nothing is an
+// error rather than an empty string — a gate pointed at "" would pass.
+func TestSmokeUrlStageResolvesToTheStagedSide(t *testing.T) {
 	dir := t.TempDir()
 	seen := filepath.Join(dir, "url")
 
@@ -635,7 +640,7 @@ func TestSmokeUrlResolvesToTheStagedSide(t *testing.T) {
 	p, err := Build(context.Background(), load(t, header+`
 strategy:
   type: blue-green
-  smoke: [ "echo {{url \"site\"}} > `+seen+`" ]
+  smoke: [ "echo {{url_stage \"site\"}} > `+seen+`" ]
 
 services:
   site:
@@ -662,6 +667,13 @@ services:
 }
 
 // --- helpers -----------------------------------------------------------------
+
+func revisionAddress(t *config.Target) string {
+	if t.Type != config.TypeECS {
+		return ""
+	}
+	return "https://" + t.Name + "--new-rev.example"
+}
 
 func equal(a, b []string) bool {
 	if len(a) != len(b) {

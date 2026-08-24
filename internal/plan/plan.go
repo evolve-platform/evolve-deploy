@@ -65,6 +65,12 @@ type ServicePlan struct {
 	// Vars are the --var values, kept here so hook variables are assembled in
 	// one place.
 	Vars map[string]string
+
+	// hookFuncs are the functions this service's hooks may call. Built once for
+	// the whole release rather than per service, because {{endpoint "..."}} may
+	// name any target in it, and set while planning so that the check and the
+	// run cannot disagree about what a name resolves to.
+	hookFuncs template.FuncMap
 }
 
 // BlueGreen reports whether this service stages a side and switches to it.
@@ -152,20 +158,192 @@ func (p *Plan) SmokeVars() map[string]any {
 	return out
 }
 
+// lookupFunc answers a hook function: which kind of address is wanted, and the
+// name the template gave it.
+type lookupFunc func(kind, name string) (string, error)
+
+// A release has three addresses and they differ in what re-points them, which is
+// the whole of why there is more than one name for "the URL".
+const (
+	// urlRevision is pinned to one revision and is never re-pointed. Container
+	// Apps is the only platform that gives every revision one.
+	urlRevision = "url_revision"
+	// urlStage is pinned to the label, so it names the side this release staged
+	// and will name a different revision after the next one. It is what a gate
+	// tests.
+	urlStage = "url_stage"
+	// urlPublic follows the traffic weights: the old version until the switch,
+	// the new one after it. It is what survives the release, and therefore what
+	// a hook writes down for something else to read later.
+	urlPublic = "url_public"
+)
+
 // SmokeFuncs builds the functions a smoke command calls to name a service.
 //
 // A function rather than a field because a Go template field has to be an
 // identifier, and {{.catalog-commercetools.url}} does not even parse. One form
 // that always works beats two where one of them is a trap.
-func SmokeFuncs(lookup func(kind, name string) (string, error)) template.FuncMap {
-	fn := func(kind string) func(string) (string, error) {
-		return func(name string) (string, error) { return lookup(kind, name) }
-	}
+func SmokeFuncs(l lookupFunc) template.FuncMap {
 	return template.FuncMap{
-		"url":      fn("url"),
-		"label":    fn("label"),
-		"revision": fn("revision"),
+		urlStage:    bind(l, urlStage),
+		urlRevision: bind(l, urlRevision),
+		urlPublic:   bind(l, urlPublic),
+		"label":     bind(l, "label"),
+		"revision":  bind(l, "revision"),
+
+		// url used to mean the staged side and now means the public address, so
+		// here — and only here — it is refused rather than resolved. Everywhere
+		// else the change is invisible, because url never worked in a hook at
+		// all. In a smoke block it would keep rendering, keep passing, and start
+		// testing the version the release is replacing, which is the one failure
+		// a gate exists to make impossible. Written out in full it is a choice
+		// rather than a leftover, so url_public is allowed above.
+		"url": func(name string) (string, error) {
+			return "", fmt.Errorf(
+				"url named the staged side here and now means the address that "+
+					"survives the release, so in a smoke block it has to be spelled out: "+
+					`{{url_stage %q}} is the side this release staged and what a gate `+
+					`tests, {{url_public %q}} the address that is still serving the `+
+					"version being replaced", name, name)
+		},
 	}
+}
+
+// HookFuncs builds the functions a service's before and after hooks may call.
+//
+// Only the public address resolves, under both its names. The other two are
+// registered all the same, as refusals: {{url_stage "x"}} in an after hook
+// renders to an address that answers correctly at that moment and names the
+// wrong revision from the next release on. Left undefined, Go reports a function
+// that does not exist, which reads as a typo — and the mistake this catches is
+// not a typo but a fair guess about which of three addresses a hook should be
+// handed.
+func HookFuncs(l lookupFunc) template.FuncMap {
+	return template.FuncMap{
+		urlPublic: bind(l, urlPublic),
+		"url":     bind(l, urlPublic),
+
+		urlStage: elsewhere(urlStage, "strategy.smoke",
+			`it names the staged side, so it stops meaning this release the moment the `+
+				`labels swap. A hook that records an address wants {{url "%name%"}}`),
+		urlRevision: elsewhere(urlRevision, "strategy.smoke",
+			`it names one revision, which this release replaces and the next one replaces `+
+				`again. A hook that records an address wants {{url "%name%"}}`),
+		"label": elsewhere("label", "strategy.smoke",
+			`a hook already has {{.label}}, which is the side its own service is going to`),
+		"revision": elsewhere("revision", "strategy.smoke",
+			`a hook already has {{.version}}, which is what it deployed`),
+	}
+}
+
+func bind(l lookupFunc, kind string) func(string) (string, error) {
+	return func(name string) (string, error) { return l(kind, name) }
+}
+
+// elsewhere is a function registered only so that using it in the wrong place
+// says where it is the right one.
+func elsewhere(name, where, why string) func(string) (string, error) {
+	return func(arg string) (string, error) {
+		return "", fmt.Errorf("%s is only available in %s: %s",
+			name, where, strings.ReplaceAll(why, "%name%", arg))
+	}
+}
+
+// publicLookup resolves {{url "..."}} in a hook to the address that target keeps
+// once the release is over.
+//
+// The naming rules are stagedLookup's: a target label always works, and a
+// service name works when exactly one of its targets has an address of its own.
+// A job or a function beside a service does not count towards that — neither has
+// an ingress — so the ordinary app-plus-job service is still nameable by its own
+// name.
+func (p *Plan) publicLookup() lookupFunc {
+	var (
+		byName    = map[string]string{}
+		count     = map[string]int{}
+		inRelease = map[string]bool{}
+		split     = map[string]bool{}
+	)
+	for _, cp := range p.Services {
+		inRelease[cp.Service.Name] = true
+		for _, ch := range cp.Changes {
+			// Both spellings, because the refusal below is the whole point of
+			// keeping this set: someone who writes the bare name of a job should
+			// be told it has no address, not that it is not in the release.
+			inRelease[ch.Target.Label()] = true
+			inRelease[ch.Target.Name] = true
+			if ch.PublicURL == "" {
+				continue
+			}
+			byName[ch.Target.Label()] = ch.PublicURL
+			count[cp.Service.Name]++
+			byName[cp.Service.Name] = ch.PublicURL
+		}
+	}
+	// A service with two addressable targets cannot be named by its own name,
+	// because that name cannot mean either of them.
+	for name, n := range count {
+		if n > 1 {
+			delete(byName, name)
+			split[name] = true
+		}
+	}
+
+	return func(_, name string) (string, error) {
+		if url, ok := byName[name]; ok {
+			return url, nil
+		}
+		known := slices.Sorted(maps.Keys(byName))
+		switch {
+		case len(known) == 0:
+			return "", fmt.Errorf(
+				"%q has no address of its own, and neither has anything else this release "+
+					"deploys — pass the address with --var instead", name)
+		case split[name]:
+			return "", fmt.Errorf(
+				"%q has more than one target with an address, so its own name cannot mean "+
+					"either — name the target: %s", name, strings.Join(known, ", "))
+		case inRelease[name]:
+			return "", fmt.Errorf(
+				"%q has no address of its own: a job carries no ingress, and not every "+
+					"target type reports one. Pass the address with --var instead", name)
+		}
+		return "", fmt.Errorf("%q is not deployed by this release — it deploys: %s",
+			name, strings.Join(known, ", "))
+	}
+}
+
+// checkHooks renders every service hook against the variables and the functions
+// it will actually be given. See hooks.Validate for why this belongs to planning.
+//
+// For the release rather than for one service, and after the carried targets
+// have been settled: {{url "..."}} may name any target the release deploys, so
+// the set of names it can resolve is only settled once every service has been
+// planned. It also writes the functions onto each service plan, so that the
+// check and the run an hour of staging later resolve the same names.
+func (p *Plan) checkHooks() []string {
+	funcs := HookFuncs(p.publicLookup())
+
+	var msgs []string
+	for _, cp := range p.Services {
+		cp.hookFuncs = funcs
+		// No deploy, no hooks — so nothing to check, and a stale hook on a
+		// service that is not moving is not this release's problem.
+		if !cp.HasWork() {
+			continue
+		}
+		for _, ph := range []struct {
+			name string
+			hs   []*hooks.Hook
+		}{{"before", cp.Service.Before}, {"after", cp.Service.After}} {
+			if err := hooks.ValidateWith(ph.hs, cp.HookVars().Data(), funcs); err != nil {
+				msgs = append(msgs, fmt.Sprintf("services.%s: %s hook: %v",
+					cp.Service.Name, ph.name, err))
+			}
+		}
+	}
+	sort.Strings(msgs)
+	return msgs
 }
 
 // checkSmoke renders the release's smoke commands without running them.
@@ -278,6 +456,11 @@ func Build(
 	p.settleRelease()
 	if msgs := p.checkOneSide(); len(msgs) > 0 {
 		sort.Strings(msgs)
+		return nil, fmt.Errorf("plan failed, nothing was deployed:\n  - %s",
+			strings.Join(msgs, "\n  - "))
+	}
+
+	if msgs := p.checkHooks(); len(msgs) > 0 {
 		return nil, fmt.Errorf("plan failed, nothing was deployed:\n  - %s",
 			strings.Join(msgs, "\n  - "))
 	}
@@ -448,9 +631,6 @@ func planService(
 	if msgs := cp.settleSide(ctx, d); len(msgs) > 0 {
 		return nil, msgs
 	}
-	if msgs := cp.checkHooks(); len(msgs) > 0 {
-		return nil, msgs
-	}
 	return cp, nil
 }
 
@@ -563,29 +743,6 @@ func (c *ServicePlan) readSide(ctx context.Context, d target.Driver) (*target.Si
 	// checkStrategy has already refused a blue-green service with nothing
 	// routable, so this is unreachable rather than a case to handle.
 	return nil, fmt.Errorf("no target carries traffic")
-}
-
-// checkHooks renders every hook line against the variables it will actually be
-// given. See hooks.Validate for why this belongs to planning.
-func (c *ServicePlan) checkHooks() []string {
-	if !c.HasWork() {
-		// No deploy, no hooks — so nothing to check, and a stale hook on a
-		// service that is not moving is not this release's problem.
-		return nil
-	}
-
-	var msgs []string
-	for phase, hs := range map[string][]*hooks.Hook{
-		"before": c.Service.Before,
-		"after":  c.Service.After,
-	} {
-		if err := hooks.Validate(hs, c.HookVars()); err != nil {
-			msgs = append(msgs, fmt.Sprintf("services.%s: %s hook: %v",
-				c.Service.Name, phase, err))
-		}
-	}
-	sort.Strings(msgs)
-	return msgs
 }
 
 // HookVars are the substitutions every hook of this service is given.

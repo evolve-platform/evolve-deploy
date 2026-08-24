@@ -286,7 +286,8 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if err := o.Hooks.Run(ctx, cp.Service.Name, "before", cp.Service.Before, cp.HookVars()); err != nil {
+			if err := o.Hooks.RunWith(ctx, cp.Service.Name, "before",
+				cp.Service.Before, cp.HookVars().Data(), cp.hookFuncs); err != nil {
 				mu.Lock()
 				failed = append(failed, fmt.Sprintf("%s: %v", cp.Service.Name, err))
 				mu.Unlock()
@@ -365,7 +366,8 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 	// after only runs on success, and a failure here does not roll anything
 	// back: the deploy worked, and removing a working version because a
 	// registration call failed is worse than the missing registration.
-	if err := o.Hooks.Run(ctx, c.Name, "after", c.After, cp.HookVars()); err != nil {
+	if err := o.Hooks.RunWith(ctx, c.Name, "after",
+		c.After, cp.HookVars().Data(), cp.hookFuncs); err != nil {
 		return err
 	}
 	return nil
@@ -568,7 +570,8 @@ func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options)
 		if len(c.After) == 0 {
 			continue
 		}
-		if err := o.Hooks.Run(ctx, c.Name, "after", c.After, cp.HookVars()); err != nil {
+		if err := o.Hooks.RunWith(ctx, c.Name, "after",
+			c.After, cp.HookVars().Data(), cp.hookFuncs); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", c.Name, err))
 		}
 	}
@@ -702,21 +705,27 @@ func smokeRelease(
 // Both a service name and a target label work. A name that staged nothing is an
 // error rather than an empty string: a smoke test quietly pointed at "" would
 // pass, and a gate that passes when it cannot reach anything is worse than no
-// gate.
+// gate. The same goes for an address the platform does not have — a Cloud Run
+// revision has no URL of its own, and falling back to the label's would answer
+// a different question than the one that was asked.
 func stagedLookup(
 	items []bgTarget,
 	staged map[*target.Change]*target.Staged,
-) func(kind, name string) (string, error) {
-	byName := map[string]*target.Staged{}
+) lookupFunc {
+	type addresses struct {
+		got *target.Staged
+		ch  *target.Change
+	}
+	byName := map[string]addresses{}
 	perService := map[string]int{}
 	for _, it := range items {
 		got, ok := staged[it.ch]
 		if !ok {
 			continue
 		}
-		byName[it.ch.Target.Label()] = got
+		byName[it.ch.Target.Label()] = addresses{got, it.ch}
 		perService[it.cp.Service.Name]++
-		byName[it.cp.Service.Name] = got
+		byName[it.cp.Service.Name] = addresses{got, it.ch}
 	}
 	// A service with two staged sides cannot be named by its own name, because
 	// that name cannot mean either of them.
@@ -727,22 +736,36 @@ func stagedLookup(
 	}
 
 	return func(kind, name string) (string, error) {
-		got, ok := byName[name]
+		at, ok := byName[name]
 		if !ok {
 			known := slices.Sorted(maps.Keys(byName))
 			return "", fmt.Errorf("%q staged nothing in this release — staged: %s",
 				name, strings.Join(known, ", "))
 		}
 		switch kind {
-		case "url":
-			if got.URL == "" {
+		case urlStage:
+			if at.got.URL == "" {
 				return "", fmt.Errorf("%q has no reachable address for its staged side", name)
 			}
-			return got.URL, nil
+			return at.got.URL, nil
+		case urlRevision:
+			if at.got.RevisionURL == "" {
+				return "", fmt.Errorf(
+					"%q staged a revision with no address of its own — only Container Apps "+
+						"gives every revision one. Use {{url_stage %q}}, which reaches the "+
+						"same revision through the label this release just attached",
+					name, name)
+			}
+			return at.got.RevisionURL, nil
+		case urlPublic:
+			if at.ch.PublicURL == "" {
+				return "", fmt.Errorf("%q has no address of its own", name)
+			}
+			return at.ch.PublicURL, nil
 		case "label":
-			return got.Label, nil
+			return at.got.Label, nil
 		case "revision":
-			return got.Revision, nil
+			return at.got.Revision, nil
 		}
 		return "", fmt.Errorf("unknown smoke function %q", kind)
 	}

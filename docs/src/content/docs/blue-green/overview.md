@@ -18,7 +18,7 @@ strategy:
   type: blue-green
   smoke:
     - uses: http
-      with: { url: '{{url "site"}}/healthz', retry: 5, delay: 2s }
+      with: { url: '{{url_stage "site"}}/healthz', retry: 5, delay: 2s }
 
 services:
   site:

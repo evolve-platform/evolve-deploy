@@ -128,6 +128,7 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 		EnvAdded:    added,
 		EnvChanged:  changed,
 		EnvRemoved:  removed,
+		PublicURL:   appURL(appFQDN(&app)),
 		Payload:     &appPayload{containers: next, previous: current},
 	}, nil
 }
@@ -714,10 +715,7 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 	// deployed is the release's call, not this target's — see Change.Carry.
 	carry := len(added)+len(changed)+len(removed) == 0 && from == want.Version
 
-	var fqdn string
-	if cfg := app.Properties.Configuration; cfg != nil && cfg.Ingress != nil {
-		fqdn = derefString(cfg.Ingress.Fqdn)
-	}
+	fqdn := appFQDN(app)
 
 	return &target.Change{
 		Service:     want.Service,
@@ -730,6 +728,7 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 		EnvRemoved:  removed,
 		Sides:       sides,
 		Carry:       carry,
+		PublicURL:   appURL(fqdn),
 		Payload:     &bgPayload{containers: next, fqdn: fqdn},
 	}, nil
 }

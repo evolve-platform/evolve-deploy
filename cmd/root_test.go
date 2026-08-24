@@ -15,17 +15,17 @@ func TestHookVars(t *testing.T) {
 	}
 
 	// A value may contain an = of its own; only the first one separates.
-	if got, err := hookVars([]string{"endpoint=https://x/?a=b"}); err != nil {
+	if got, err := hookVars([]string{"callback=https://x/?a=b"}); err != nil {
 		t.Fatal(err)
-	} else if got["endpoint"] != "https://x/?a=b" {
-		t.Errorf("endpoint = %q", got["endpoint"])
+	} else if got["callback"] != "https://x/?a=b" {
+		t.Errorf("callback = %q", got["callback"])
 	}
 }
 
 // Shadowing one of the tool's own names would mean a hook receiving a different
 // version than the one being deployed.
 func TestHookVarsRefusesReservedNames(t *testing.T) {
-	for _, name := range []string{"version", "label", "previous_label", "url", "env"} {
+	for _, name := range []string{"version", "label", "previous_label", "url", "url_stage", "url_public", "env"} {
 		if _, err := hookVars([]string{name + "=x"}); err == nil {
 			t.Errorf("--var %s= was accepted", name)
 		} else if !strings.Contains(err.Error(), "the tool's own") {
