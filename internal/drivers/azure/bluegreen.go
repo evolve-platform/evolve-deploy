@@ -777,7 +777,7 @@ func (d *Driver) waitRunning(
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(pollInterval):
+		case <-time.After(d.poll):
 		}
 	}
 }

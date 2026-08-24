@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azappconfig"
@@ -62,6 +63,12 @@ type Driver struct {
 	// requiring an App Configuration endpoint from every one of them would be
 	// configuration for its own sake.
 	appConfig *azappconfig.Client
+
+	// poll is how often a wait re-reads the app and the revision under it. A
+	// field rather than the constant it is set from, so that a test of the wait
+	// itself does not have to spend five seconds per poll to find out what it
+	// decided.
+	poll time.Duration
 }
 
 // New builds a driver from the ambient credential chain — in CI that is the
@@ -71,24 +78,35 @@ func New(_ context.Context, f *config.File) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("azure: no usable credentials: %w", err)
 	}
+	return newDriver(f, cred, nil)
+}
 
-	apps, err := armappcontainers.NewContainerAppsClient(f.Cloud.Subscription, cred, nil)
+// newDriver builds the clients against whatever the options point at.
+//
+// Split from New because the credential chain is the one part of this that
+// cannot be faked, and everything interesting is on the other side of it: the
+// code that decides whether a rollout failed is only reachable through a
+// client, so a test hands this a credential that signs nothing and an ARM
+// transport that answers from a table. In production both arguments come from
+// New and nothing here behaves differently.
+func newDriver(f *config.File, cred azcore.TokenCredential, opts *arm.ClientOptions) (*Driver, error) {
+	apps, err := armappcontainers.NewContainerAppsClient(f.Cloud.Subscription, cred, opts)
 	if err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
-	jobs, err := armappcontainers.NewJobsClient(f.Cloud.Subscription, cred, nil)
+	jobs, err := armappcontainers.NewJobsClient(f.Cloud.Subscription, cred, opts)
 	if err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
-	sites, err := armappservice.NewWebAppsClient(f.Cloud.Subscription, cred, nil)
+	sites, err := armappservice.NewWebAppsClient(f.Cloud.Subscription, cred, opts)
 	if err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
-	revisions, err := armappcontainers.NewContainerAppsRevisionsClient(f.Cloud.Subscription, cred, nil)
+	revisions, err := armappcontainers.NewContainerAppsRevisionsClient(f.Cloud.Subscription, cred, opts)
 	if err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
-	replicas, err := armappcontainers.NewContainerAppsRevisionReplicasClient(f.Cloud.Subscription, cred, nil)
+	replicas, err := armappcontainers.NewContainerAppsRevisionReplicasClient(f.Cloud.Subscription, cred, opts)
 	if err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
 	}
@@ -99,6 +117,7 @@ func New(_ context.Context, f *config.File) (*Driver, error) {
 		// Long enough for a package upload on a slow link; the deployment
 		// itself is waited for separately.
 		http: &http.Client{Timeout: 5 * time.Minute},
+		poll: pollInterval,
 	}
 
 	if f.Cloud.AppConfig != "" {
