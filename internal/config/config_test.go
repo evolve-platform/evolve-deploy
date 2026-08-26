@@ -455,3 +455,33 @@ services:
 		t.Fatal("a service depending on itself was accepted")
 	}
 }
+
+// A job is a target type of one cloud, and the table that says so is the whole
+// check — so both halves of it are worth a line here.
+func TestACloudRunJobBelongsToGCPOnly(t *testing.T) {
+	const gcpHeader = `
+cloud:
+  provider: gcp
+  project: evolve-tst
+  region: europe-west4
+`
+	f, err := load(t, gcpHeader+`
+services:
+  discover:
+    version: abc1234
+    targets:
+      - { type: cloud-run,     name: evolve-tst-discover }
+      - { type: cloud-run-job, name: evolve-tst-discover-products }
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(f.Services["discover"].Targets); n != 2 {
+		t.Fatalf("got %d targets, want 2", n)
+	}
+
+	_, err = load(t, awsHeader+"services:\n  site:\n    version: a\n    type: cloud-run-job\n")
+	if err == nil || !strings.Contains(err.Error(), "is not valid on aws") {
+		t.Errorf("err = %v, want a refusal naming aws", err)
+	}
+}

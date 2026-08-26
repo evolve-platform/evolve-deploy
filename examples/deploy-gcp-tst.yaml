@@ -18,9 +18,14 @@ services:
     after:
       - hive schema:publish --service purchase --commit {{.version}}
 
+  # One image, three deployables, one version written once: the sync jobs run
+  # the same build as the service, with different arguments Terraform gave them.
   catalog-commercetools:
     version: abc1234
-    type: cloud-run
+    targets:
+      - { type: cloud-run,     name: catalog-commercetools }
+      - { type: cloud-run-job, name: catalog-ct-products }
+      - { type: cloud-run-job, name: catalog-ct-categories }
 
   site:
     version: def5678

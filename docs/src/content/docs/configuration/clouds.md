@@ -13,7 +13,7 @@ config is an error rather than something silently ignored.
 | `provider` | Target `type`s | Rest of the block |
 |---|---|---|
 | `aws` | `ecs`, `lambda` | `account` + `region` |
-| `gcp` | `cloud-run` | `project` + `region` |
+| `gcp` | `cloud-run`, `cloud-run-job` | `project` + `region` |
 | `azure` | `container-app`, `container-app-job`, `function-app` | `subscription` + `resource_group`, optionally `app_config` |
 | `kubernetes` | `helm` | `context` + `namespace` |
 
@@ -94,6 +94,34 @@ services:
 
 Updates carry only the `template` field mask, so ingress, IAM, traffic split and
 everything else on the service are untouched.
+
+### `cloud-run-job`
+
+```yaml
+services:
+  discover:
+    version: abc1234
+    targets:
+      - { type: cloud-run,     name: evolve-tst-discover }
+      - { type: cloud-run-job, name: evolve-tst-discover-products }
+      - { type: cloud-run-job, name: evolve-tst-discover-categories }
+```
+
+A job is the same image as the service beside it, started with different
+arguments. Those arguments live in the task template and are Terraform's; only
+the tag and the environment are written here.
+
+`UpdateJob` takes no field mask, so unlike a service the whole resource goes
+back over the wire. What keeps Terraform's settings — parallelism, retries,
+timeout, the service account — is that it is the job that was just read, with
+one container changed and nothing else touched. An etag rides along, so a job
+that moved in between fails the write rather than being overwritten.
+
+Jobs carry no traffic, so in a blue-green release they ride along — their
+templates are written at the switch, never before it.
+
+There is no readiness to wait for: a job runs when it is triggered, so a broken
+image is discovered at the next run rather than at deploy time.
 
 ## Azure
 

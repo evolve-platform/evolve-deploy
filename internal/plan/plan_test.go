@@ -75,7 +75,7 @@ func (d *fakeDriver) Plan(_ context.Context, want *target.Desired) (*target.Chan
 // an address of its own, and a rider beside it has none.
 func fakePublicURL(t *config.Target) string {
 	switch t.Type {
-	case config.TypeLambda, config.TypeContainerJob, config.TypeFunctionApp:
+	case config.TypeLambda, config.TypeContainerJob, config.TypeCloudRunJob, config.TypeFunctionApp:
 		return ""
 	}
 	return "https://" + t.Name + ".example"

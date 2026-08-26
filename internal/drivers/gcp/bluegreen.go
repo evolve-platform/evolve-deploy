@@ -42,8 +42,9 @@ type bgPayload struct {
 	url string
 }
 
-// Routable reports which target types carry traffic. Cloud Run services all do;
-// there is no jobs-shaped target here yet to ride along.
+// Routable reports which target types carry traffic. A Cloud Run service does;
+// a Cloud Run job has no ingress, so it rides along with the service it shares
+// an image with and is written at the switch.
 func (d *Driver) Routable(t config.TargetType) bool {
 	return t == config.TypeCloudRun
 }
@@ -703,7 +704,7 @@ func (d *Driver) planServiceBlueGreen(
 	managed := t.Strategy.SideEnvNames()
 	next = withSide(next, name, sides.Idle.Label, want.SideEnv[sides.Idle.Label], managed)
 
-	added, changed, removed := diffEnv(current, next, name, managed)
+	added, changed, removed := diffEnv(current.GetContainers(), next.GetContainers(), name, managed)
 
 	// Nothing changed here, but the side still needs a revision of its own: the
 	// staged side is only a stack if every service is on it, and a revision can
