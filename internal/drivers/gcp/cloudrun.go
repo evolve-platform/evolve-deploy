@@ -58,7 +58,7 @@ func (d *Driver) planService(ctx context.Context, want *target.Desired) (*target
 		return nil, err
 	}
 
-	added, changed, removed := diffEnv(current, next, name, nil)
+	added, changed, removed := diffEnv(current.GetContainers(), next.GetContainers(), name, nil)
 	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
 		return nil, nil
 	}
@@ -160,14 +160,35 @@ func nextTemplate(
 	// would make Cloud Run reject the update.
 	next.Revision = ""
 
+	from, err = retag(next.GetContainers(), name, version, env, manageEnv)
+	if err != nil {
+		return nil, "", err
+	}
+	return next, from, nil
+}
+
+// retag rewrites one container of an already-copied list in place: the image
+// tag, and the environment when the config declares one.
+//
+// It works on containers rather than on a template because a service and a job
+// hold theirs in different messages — a RevisionTemplate against a TaskTemplate
+// two levels down a Job — while the rule for the container itself is the same
+// on both. Everything not named here is left as it was found, which is how a
+// sidecar keeps the image and settings Terraform gave it.
+func retag(
+	containers []*runpb.Container,
+	name, version string,
+	env []target.EnvVar,
+	manageEnv bool,
+) (from string, err error) {
 	var found bool
-	for _, c := range next.GetContainers() {
+	for _, c := range containers {
 		if c.GetName() != name {
 			continue
 		}
 		img, err := image.Retag(c.GetImage(), version)
 		if err != nil {
-			return nil, "", err
+			return "", err
 		}
 		from = image.Tag(c.GetImage())
 		c.Image = img
@@ -175,9 +196,9 @@ func nextTemplate(
 		found = true
 	}
 	if !found {
-		return nil, "", fmt.Errorf("container %q disappeared while building the revision", name)
+		return "", fmt.Errorf("container %q disappeared while building the update", name)
 	}
-	return next, from, nil
+	return from, nil
 }
 
 // containerEnv is the environment the next revision carries for the container
@@ -264,12 +285,12 @@ func envFingerprint(env []*runpb.EnvVar, ignore []string) map[string]string {
 }
 
 func diffEnv(
-	current, next *runpb.RevisionTemplate,
+	current, next []*runpb.Container,
 	name string,
 	ignore []string,
 ) (added, changed, removed []string) {
-	have := envFingerprint(findContainer(current.GetContainers(), name).GetEnv(), ignore)
-	want := envFingerprint(findContainer(next.GetContainers(), name).GetEnv(), ignore)
+	have := envFingerprint(findContainer(current, name).GetEnv(), ignore)
+	want := envFingerprint(findContainer(next, name).GetEnv(), ignore)
 
 	for k, wv := range want {
 		hv, ok := have[k]

@@ -37,6 +37,7 @@ const (
 	TypeECS          TargetType = "ecs"
 	TypeLambda       TargetType = "lambda"
 	TypeCloudRun     TargetType = "cloud-run"
+	TypeCloudRunJob  TargetType = "cloud-run-job"
 	TypeContainerApp TargetType = "container-app"
 	TypeContainerJob TargetType = "container-app-job"
 	TypeFunctionApp  TargetType = "function-app"
@@ -46,7 +47,7 @@ const (
 // typesByCloud is also the validation table: a type is valid only for its cloud.
 var typesByCloud = map[Cloud][]TargetType{
 	CloudAWS:        {TypeECS, TypeLambda},
-	CloudGCP:        {TypeCloudRun},
+	CloudGCP:        {TypeCloudRun, TypeCloudRunJob},
 	CloudAzure:      {TypeContainerApp, TypeContainerJob, TypeFunctionApp},
 	CloudKubernetes: {TypeHelm},
 }

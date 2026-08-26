@@ -25,7 +25,7 @@ resolves it, the value never passes through CI at all.
 | Target | `${secret:}` | `${param:}` |
 |---|---|---|
 | `ecs` | `valueFrom` | `valueFrom` |
-| `cloud-run` | `secretKeyRef` | read from Secret Manager |
+| `cloud-run`, `cloud-run-job` | `secretKeyRef` | read from Secret Manager |
 | `container-app`, `container-app-job` | `secretRef` | read from App Configuration |
 | `lambda` | read by the tool | read by the tool |
 | `function-app` | not managed | not managed |

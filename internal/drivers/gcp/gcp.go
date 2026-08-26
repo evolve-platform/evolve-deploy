@@ -1,4 +1,4 @@
-// Package gcp implements the Cloud Run target.
+// Package gcp implements the Cloud Run targets.
 //
 // GCP has one store, and that shapes what the two reference schemes mean here.
 // Cloud Run can mount a Secret Manager secret itself through secretKeyRef, and
@@ -33,6 +33,7 @@ type Driver struct {
 
 	services  *run.ServicesClient
 	revisions *run.RevisionsClient
+	jobs      *run.JobsClient
 	secrets   *secretmanager.Client
 }
 
@@ -50,20 +51,31 @@ func New(ctx context.Context, f *config.File) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
+	jobs, err := run.NewJobsClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcp: %w", err)
+	}
 	secrets, err := secretmanager.NewClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
-	return &Driver{file: f, services: services, revisions: revisions, secrets: secrets}, nil
+	return &Driver{
+		file:      f,
+		services:  services,
+		revisions: revisions,
+		jobs:      jobs,
+		secrets:   secrets,
+	}, nil
 }
 
 func (d *Driver) Name() string { return "gcp" }
 
-// Capabilities: Cloud Run resolves a Secret Manager reference itself. It has no
-// equivalent for anything else, so ${param:…} is read here.
+// Capabilities: Cloud Run resolves a Secret Manager reference itself, in a job
+// exactly as in a service — the container is the same message either side. It
+// has no equivalent for anything else, so ${param:…} is read here.
 func (d *Driver) Capabilities(t config.TargetType) target.Capability {
 	switch t {
-	case config.TypeCloudRun:
+	case config.TypeCloudRun, config.TypeCloudRunJob:
 		return target.Capability{NativeSecret: true}
 	default:
 		return target.Capability{}
@@ -85,6 +97,8 @@ func (d *Driver) Plan(ctx context.Context, want *target.Desired) (*target.Change
 			return d.planServiceBlueGreen(ctx, want)
 		}
 		return d.planService(ctx, want)
+	case config.TypeCloudRunJob:
+		return d.planJob(ctx, want)
 	default:
 		return nil, &target.ErrNotImplemented{Cloud: "gcp", Type: want.Target.Type}
 	}
@@ -94,6 +108,8 @@ func (d *Driver) Apply(ctx context.Context, ch *target.Change) error {
 	switch ch.Target.Type {
 	case config.TypeCloudRun:
 		return d.applyService(ctx, ch)
+	case config.TypeCloudRunJob:
+		return d.applyJob(ctx, ch)
 	default:
 		return &target.ErrNotImplemented{Cloud: "gcp", Type: ch.Target.Type}
 	}
@@ -103,6 +119,8 @@ func (d *Driver) Revert(ctx context.Context, ch *target.Change) error {
 	switch ch.Target.Type {
 	case config.TypeCloudRun:
 		return d.revertService(ctx, ch)
+	case config.TypeCloudRunJob:
+		return d.revertJob(ctx, ch)
 	default:
 		return &target.ErrNotImplemented{Cloud: "gcp", Type: ch.Target.Type}
 	}
@@ -111,6 +129,11 @@ func (d *Driver) Revert(ctx context.Context, ch *target.Change) error {
 // serviceName builds the resource path Cloud Run expects.
 func (d *Driver) serviceName(name string) string {
 	return fmt.Sprintf("projects/%s/locations/%s/services/%s", d.file.Cloud.Project, d.file.Cloud.Region, name)
+}
+
+// jobName is serviceName for the other collection.
+func (d *Driver) jobName(name string) string {
+	return fmt.Sprintf("projects/%s/locations/%s/jobs/%s", d.file.Cloud.Project, d.file.Cloud.Region, name)
 }
 
 // --- references --------------------------------------------------------------

@@ -1,0 +1,20 @@
+kind: Added
+body: 'GCP now has the target type Azure already had beside its service: `cloud-run-job`.
+  A sync job is the same image as the service next to it, started with different arguments,
+  and until now a GCP config could only name the service — so the four `evolve sync <job>`
+  runs sharing that build had to be tagged by hand or left on the previous version. They
+  are declared the way Container App Jobs are, as extra targets of the service, which is
+  what keeps one image, one version, written once. Only the tag and the environment are
+  written; the arguments, parallelism, retries and timeout are Terraform''s and survive
+  the write. That last part takes more care here than on a service: `UpdateJob` accepts
+  no field mask, so the whole resource goes back over the wire rather than just the
+  template, and what protects Terraform''s settings is that it is the job that was just
+  read with one container changed. An etag rides along, so a job that moved in between
+  fails the write instead of being overwritten silently, and a failed write puts the
+  previous definition back — a revision that will not start never takes traffic, but a
+  job definition has nothing in front of it and what is left behind is what the 03:00
+  cron runs. In a blue-green release a job rides along exactly as it does on Azure: it
+  carries no traffic, so it is written at the switch and never before it. There is no
+  readiness to wait for either way, which means a broken image is found at the next run
+  rather than at deploy time'
+time: 2026-08-26T10:15:00.000000000+02:00

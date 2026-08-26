@@ -49,6 +49,9 @@ traffic scales itself to zero.
 **`keep_warm` is refused here.** Keeping a revision warm is
 `scaling.min_instance_count` on the template, which Terraform owns.
 
+Cloud Run **jobs** carry no traffic, so they ride along the same way Container
+App Jobs do: their definitions are written at the switch, never before it.
+
 :::caution[The one genuine trap on Cloud Run]
 A *service*-level minimum instance count does not apply to a tagged revision. If
 you rely on a service minimum to avoid cold starts, the staged side will not

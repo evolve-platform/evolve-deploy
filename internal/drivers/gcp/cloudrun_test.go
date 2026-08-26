@@ -151,7 +151,7 @@ func TestDiffEnvIgnoresRotations(t *testing.T) {
 		},
 	})
 
-	added, changed, removed := diffEnv(current, next, "app", nil)
+	added, changed, removed := diffEnv(current.GetContainers(), next.GetContainers(), "app", nil)
 	if !reflect.DeepEqual(added, []string{"NEW"}) {
 		t.Errorf("added = %v", added)
 	}

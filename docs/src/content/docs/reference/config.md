@@ -83,7 +83,7 @@ services:
 
 | Key | | |
 |---|---|---|
-| `type` | required | `ecs` \| `lambda` \| `cloud-run` \| `container-app` \| `container-app-job` \| `function-app` \| `helm` |
+| `type` | required | `ecs` \| `lambda` \| `cloud-run` \| `cloud-run-job` \| `container-app` \| `container-app-job` \| `function-app` \| `helm` |
 | `name` | required | The resource name |
 | `env` | | Adds to, and overrides, the service's `env` |
 | `cluster` | ecs | Cluster name or ARN. Required for `ecs` |

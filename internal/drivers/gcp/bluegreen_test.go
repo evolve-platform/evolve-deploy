@@ -256,7 +256,7 @@ func TestSideIsWrittenButNotCompared(t *testing.T) {
 		t.Errorf("an unrelated variable was lost: %v", env)
 	}
 
-	added, changed, removed := diffEnv(current, next, "app", nil)
+	added, changed, removed := diffEnv(current.GetContainers(), next.GetContainers(), "app", nil)
 	if len(added)+len(changed)+len(removed) != 0 {
 		t.Errorf("the side produced a diff: +%v ~%v -%v", added, changed, removed)
 	}
@@ -282,7 +282,7 @@ func TestSideEnvReplacesTheOtherSidesValues(t *testing.T) {
 
 	// And it is invisible to the diff, because a value that differs by side by
 	// definition is not a change anyone made.
-	added, changed, removed := diffEnv(current, next, "app", managed)
+	added, changed, removed := diffEnv(current.GetContainers(), next.GetContainers(), "app", managed)
 	if len(added)+len(changed)+len(removed) != 0 {
 		t.Errorf("the side environment produced a diff: +%v ~%v -%v", added, changed, removed)
 	}
