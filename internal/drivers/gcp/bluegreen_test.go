@@ -85,6 +85,33 @@ func TestReadSides(t *testing.T) {
 		name:    "a tag the config does not know",
 		traffic: []*runpb.TrafficTarget{tt("staging", "site-00001", 100)},
 		wantErr: "not one of blue or green",
+	}, {
+		// What a Terraform bootstrap actually produces: the 100% entry and the
+		// tag written as two blocks, both following whatever is newest. Cloud
+		// Run serves that as one tagged entry at 100%, so blue is the active
+		// side even though the entry carrying the percentage has no tag.
+		name:          "the tag rides in an entry of its own",
+		traffic:       []*runpb.TrafficTarget{ttLatest("", 100), ttLatest("blue", 0)},
+		wantActive:    "blue",
+		wantIdle:      "green",
+		wantPinNeeded: true,
+	}, {
+		name:       "the tag rides beside a pinned entry",
+		traffic:    []*runpb.TrafficTarget{tt("", "site-00001", 100), tt("blue", "site-00001", 0)},
+		wantActive: "blue",
+		wantIdle:   "green",
+	}, {
+		// Both sides claiming the serving revision leaves nothing to deploy
+		// away from, so this stays a refusal rather than a coin toss.
+		name:    "both tags alias the serving revision",
+		traffic: []*runpb.TrafficTarget{ttLatest("", 100), ttLatest("blue", 0), ttLatest("green", 0)},
+		wantErr: "no tag",
+	}, {
+		// A tag pinned to a revision is not the untagged rule that happens to
+		// point at it today, so this is not an alias.
+		name:    "a pinned tag does not alias a latest entry",
+		traffic: []*runpb.TrafficTarget{ttLatest("", 100), tt("blue", "site-00001", 0)},
+		wantErr: "no tag",
 	}}
 
 	for _, c := range cases {

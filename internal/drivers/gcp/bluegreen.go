@@ -155,6 +155,18 @@ func readSides(traffic []*runpb.TrafficTarget, labels []string) (*target.Sides, 
 	active := serving[0]
 	tag := active.GetTag()
 	if tag == "" {
+		// A tag is allowed to ride in an entry of its own. An untagged entry at
+		// 100% next to a tagged one aiming at the same revision is one side
+		// written in two lines, not two sides — the service's status collapses
+		// the pair into a single tagged entry at 100%, and that is the shape a
+		// Terraform bootstrap of `traffic { percent = 100 }` plus
+		// `traffic { tag = "blue" }` leaves behind. Resolve it rather than
+		// refuse the very state the refusal below asks for.
+		if alias := aliasOf(active, traffic, labels); alias != nil {
+			active, tag = alias, alias.GetTag()
+		}
+	}
+	if tag == "" {
 		// The state every Cloud Run service starts in: one implicit LATEST
 		// entry, no tag. Nothing here can fix it — `traffic --to` moves a tag
 		// that exists and cannot invent the first one — so the refusal names
@@ -189,6 +201,46 @@ func readSides(traffic []*runpb.TrafficTarget, labels []string) (*target.Sides, 
 		sides.Idle.Revision = shortRevision(w.GetRevision())
 	}
 	return sides, nil
+}
+
+// aliasOf finds the tagged entry that aims at the same revision as the untagged
+// entry carrying all the traffic, so the tag can be read as the active side.
+//
+// Two candidates is not an alias but an ambiguity — both sides claiming the
+// serving revision is a state to refuse, not to pick a winner from.
+func aliasOf(
+	active *runpb.TrafficTarget,
+	traffic []*runpb.TrafficTarget,
+	labels []string,
+) *runpb.TrafficTarget {
+	var found *runpb.TrafficTarget
+	for _, w := range traffic {
+		if w == nil || w == active || !slices.Contains(labels, w.GetTag()) {
+			continue
+		}
+		if !sameRevision(active, w) {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = w
+	}
+	return found
+}
+
+// sameRevision reports whether two entries resolve to one revision: either both
+// follow whatever is newest, or both name the same one. A LATEST entry and a
+// pinned one are deliberately not the same even when the pin happens to name
+// today's newest revision — one is a rule and the other a reference, and which
+// of the two the tag follows is the difference that matters here.
+func sameRevision(a, b *runpb.TrafficTarget) bool {
+	const latest = runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST
+	if a.GetType() == latest || b.GetType() == latest {
+		return a.GetType() == b.GetType()
+	}
+	rev := shortRevision(a.GetRevision())
+	return rev != "" && rev == shortRevision(b.GetRevision())
 }
 
 // describeTraffic renders a traffic block for an error message. Whoever reads a
