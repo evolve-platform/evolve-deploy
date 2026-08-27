@@ -100,8 +100,10 @@ evolve-deploy traffic deploy/prd.yaml --to blue
 
 ## The idle side is switched off
 
-The previous version keeps its label at 0% and that is the rollback target — but
-after the switch it is switched off.
+The previous version stays reachable as the rollback target — but after the
+switch it stops running. How it stops differs per cloud, and on Cloud Run so does
+what is left pointing at it: see [the per-cloud
+differences](../clouds/).
 
 A Container Apps revision that is not deactivated holds on to its own scale
 rules, so with `minReplicas >= 1` the side nobody is using goes on costing money

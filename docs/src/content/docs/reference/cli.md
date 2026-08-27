@@ -71,6 +71,36 @@ Refuses when the traffic is split, when a side has never served, when targets
 disagree on which side is idle, or when the two sides do not hold the same
 version everywhere.
 
+## `evolve-deploy prune <config>`
+
+Cloud Run only. Remove revisions that nothing needs any more. Cloud Run keeps
+every revision it has ever been given and nothing there expires, so a service
+deployed twice a day accumulates them until it meets a quota.
+
+| Flag | |
+|---|---|
+| `--dry-run` | List what would be removed without removing anything |
+
+Never removed, read off the platform at the moment of the sweep rather than from
+any release:
+
+- the revision serving traffic, and anything else the traffic block names
+- the revision the traffic block resolves to when it says "the newest"
+- the revision recorded as the side to roll back to
+- anything younger than the retention window
+
+That third one is why this is a command rather than a shell loop. A blue-green
+switch takes the tag off the side it retires, so from the outside the rollback
+target looks exactly like every other untagged revision — and deleting it throws
+away the only thing `rollback` can reach.
+
+The retention window is **90 days and currently hardcoded**. It will become a
+setting in the deploy config; until then a revision younger than that is kept
+whatever else is true of it.
+
+Deleting a revision cannot be undone. The first sweep of a long-lived service is
+slow: each revision is removed and waited for.
+
 ## `evolve-deploy version`
 
 ```console

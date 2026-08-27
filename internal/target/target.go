@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/evolve-platform/evolve-deploy/internal/config"
 	"github.com/evolve-platform/evolve-deploy/internal/refs"
@@ -359,6 +360,59 @@ var ErrNoWindow = errors.New("the release has finished; there is nothing left to
 // The string is what happened, in a phrase fit for a line of output.
 type Undoer interface {
 	Undo(ctx context.Context, t *config.Target) (string, error)
+}
+
+// PruneRetention is how long a revision is kept after nothing needs it.
+//
+// Hardcoded for now, and a `strategy` field later. Ninety days is chosen to be
+// longer than anyone's memory of a release rather than to be exactly right: the
+// reason to keep an old revision is to be able to read what it was configured
+// with when something turns out to have broken quietly weeks ago, and a number
+// that has to be argued about before the first prune is a prune that never
+// happens. When it becomes a flag, this is its default.
+const PruneRetention = 90 * 24 * time.Hour
+
+// Pruned is one revision a prune looked at.
+type Pruned struct {
+	Revision string
+	Age      time.Duration
+	// Keep is why the revision was left alone, in a phrase fit for a line of
+	// output, and empty for one that was removed. Every revision comes back
+	// either way: a cleanup that reports only what it destroyed cannot be
+	// checked before it is run.
+	Keep string
+}
+
+// Removed reports whether this revision was the kind a prune takes away.
+func (p Pruned) Removed() bool { return p.Keep == "" }
+
+// Pruner is implemented by drivers whose platform keeps every revision it has
+// ever been given until someone says otherwise.
+//
+// Cloud Run is the case that needs it: nothing there expires, so a service
+// deployed twice a day accumulates revisions until it meets a quota, and the
+// tool that knows which of them are load-bearing is this one. The knowing is the
+// whole argument for the command living here — after a switch the previous side
+// has no tag, so an outside script cannot tell the rollback target apart from
+// the eight hundred revisions behind it.
+//
+// Not every driver has this shape. An ECS task definition is a revision of
+// sorts, and Container Apps revisions are their own question; a driver that
+// cannot answer it does not implement this, and the command says so rather than
+// pretending to have swept.
+type Pruner interface {
+	// Prunable reports which target types hold revisions worth sweeping, so no
+	// caller has to switch on a target type to find out.
+	Prunable(t config.TargetType) bool
+
+	// Prune reports every revision of a target and what became of it, removing
+	// the ones nothing needs unless dryRun.
+	//
+	// What it must never remove is the point: the revision serving traffic, and
+	// the one recorded as the side to roll back to. Both come from the platform
+	// at the moment of the sweep rather than from a release, because a prune is
+	// most likely to be run long after the last deploy.
+	Prune(ctx context.Context, t *config.Target, dryRun bool) ([]Pruned, error)
 }
 
 // TrafficEntry is one row of a target's traffic split.
