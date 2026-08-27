@@ -146,6 +146,26 @@ func TestAgreeOnRollback(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not hold the same version") {
 		t.Errorf("error = %v", err)
 	}
+
+	// A version that could not be read is not a version that disagrees. This is
+	// the mixed state a Cloud Run environment is in for exactly one release
+	// after the version started being stamped on the revision: the side that
+	// has been redeployed since answers, the one that has not cannot.
+	if err := agreeOnRollback([]rollbackStep{
+		step("site", "green", "blue", "v1"),
+		step("api", "green", "blue", ""),
+	}); err != nil {
+		t.Errorf("an unreadable version is not a disagreement: %v", err)
+	}
+
+	// And nothing anywhere knows: still one move, still not this function's
+	// business to stop.
+	if err := agreeOnRollback([]rollbackStep{
+		step("site", "green", "blue", ""),
+		step("api", "green", "blue", ""),
+	}); err != nil {
+		t.Errorf("no versions known at all is still one rollback: %v", err)
+	}
 }
 
 // The two shapes of rollback are picked by what the driver says about itself,

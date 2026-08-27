@@ -390,7 +390,7 @@ func revert(ctx context.Context, changes []*target.Change, o Options) []string {
 
 	for _, ch := range changes {
 		fmt.Fprintf(o.Out, "  %-*s reverting to %s\n", o.Width,
-			ch.Target.Label(), orNone(ch.FromVersion))
+			ch.Target.Label(), target.VersionOrUnknown(ch.FromVersion))
 
 		wg.Go(func() {
 			if err := o.Driver.Revert(ctx, ch); err != nil {
@@ -404,13 +404,6 @@ func revert(ctx context.Context, changes []*target.Change, o Options) []string {
 	wg.Wait()
 
 	return errs
-}
-
-func orNone(s string) string {
-	if s == "" {
-		return "(none)"
-	}
-	return s
 }
 
 // applyBlueGreen releases one service a side at a time.
@@ -557,7 +550,7 @@ func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options)
 		// starts a container first.
 		fmt.Fprintf(o.Out, "  %-*s %s serves %s, rollback is %s %s (%s)\n", o.Width,
 			it.ch.Target.Label(), it.ch.Sides.Idle.Label, it.ch.ToVersion,
-			it.ch.Sides.Active.Label, orNone(it.ch.FromVersion), it.ch.Fallback)
+			it.ch.Sides.Active.Label, target.VersionOrUnknown(it.ch.FromVersion), it.ch.Fallback)
 	}
 
 	// The after hooks are still per service and still run only once its own
@@ -837,7 +830,7 @@ func abandonAll(
 	for _, ch := range changes {
 		fmt.Fprintf(o.Out, "  %-*s discarding %s, %s keeps serving %s\n", o.Width,
 			ch.Target.Label(), ch.Sides.Idle.Label, ch.Sides.Active.Label,
-			orNone(ch.FromVersion))
+			target.VersionOrUnknown(ch.FromVersion))
 
 		wg.Go(func() {
 			if err := r.Abandon(ctx, ch); err != nil {

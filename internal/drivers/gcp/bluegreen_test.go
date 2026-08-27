@@ -375,3 +375,64 @@ func TestBakeTimeIsRefusedOnCloudRun(t *testing.T) {
 		}
 	}
 }
+
+// The version has to survive a round trip through a Cloud Run revision, which
+// keeps the image as a digest and so cannot carry it. Staging writes the note
+// and reading a side is what depends on it.
+func TestVersionSurvivesARevision(t *testing.T) {
+	current := &runpb.RevisionTemplate{
+		Containers: []*runpb.Container{{
+			Name:  "app",
+			Image: "europe-west4-docker.pkg.dev/evolve-mgmt/evolve/purchase@sha256:17df9cfe",
+		}},
+	}
+
+	next, from, err := nextTemplate(current, "app", "27ec167", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The digest the tag resolved to is not the version it resolved from, so
+	// there is nothing to report as the previous release here.
+	if from != "" {
+		t.Errorf("from = %q, want empty for a digest-pinned image", from)
+	}
+	if got := next.GetAnnotations()[versionAnnotation]; got != "27ec167" {
+		t.Errorf("annotation = %q, want 27ec167", got)
+	}
+	if got := next.GetContainers()[0].GetImage(); !strings.HasSuffix(got, "/purchase:27ec167") {
+		t.Errorf("image = %q, want the digest replaced by the tag", got)
+	}
+
+	// What Cloud Run gives back: the annotation as written, the image resolved
+	// to a digest of its own.
+	served := &runpb.Revision{
+		Annotations: next.GetAnnotations(),
+		Containers: []*runpb.Container{{
+			Name:  "app",
+			Image: "europe-west4-docker.pkg.dev/evolve-mgmt/evolve/purchase@sha256:bdfeeb04",
+		}},
+	}
+	if got := revisionVersion(served, "app"); got != "27ec167" {
+		t.Errorf("revisionVersion = %q, want 27ec167", got)
+	}
+}
+
+// A revision Terraform created, or one written before the note existed, has no
+// annotation — and there the image may still carry a tag worth reading.
+func TestRevisionVersionFallsBackToTheTag(t *testing.T) {
+	rev := &runpb.Revision{
+		Containers: []*runpb.Container{{
+			Name:  "app",
+			Image: "europe-west4-docker.pkg.dev/evolve-mgmt/evolve/purchase:8618aae",
+		}},
+	}
+	if got := revisionVersion(rev, "app"); got != "8618aae" {
+		t.Errorf("revisionVersion = %q, want 8618aae", got)
+	}
+
+	// Neither an annotation nor a tag is unknown, not a digest hex.
+	rev.Containers[0].Image = "europe-west4-docker.pkg.dev/evolve-mgmt/evolve/purchase@sha256:bdfeeb04"
+	if got := revisionVersion(rev, "app"); got != "" {
+		t.Errorf("revisionVersion = %q, want empty", got)
+	}
+}

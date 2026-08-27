@@ -260,9 +260,9 @@ func (d *Driver) applyFunctionApp(ctx context.Context, ch *target.Change) error 
 		}
 		if rbErr := d.pushFunction(ctx, ch.Target.Name, p.previous); rbErr != nil {
 			return errors.Join(
-				fmt.Errorf("rollback to %s also failed", orNone(ch.FromVersion)), err, rbErr)
+				fmt.Errorf("rollback to %s also failed", target.VersionOrUnknown(ch.FromVersion)), err, rbErr)
 		}
-		return fmt.Errorf("rolled back to %s: %w", orNone(ch.FromVersion), err)
+		return fmt.Errorf("rolled back to %s: %w", target.VersionOrUnknown(ch.FromVersion), err)
 	}
 	return nil
 }

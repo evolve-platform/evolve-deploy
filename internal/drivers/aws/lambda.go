@@ -199,7 +199,7 @@ func (d *Driver) revertLambda(ctx context.Context, ch *target.Change) error {
 
 func lambdaReason(from, to string) string {
 	if from != to {
-		return fmt.Sprintf("version %s -> %s", orNone(from), to)
+		return fmt.Sprintf("version %s -> %s", target.VersionOrUnknown(from), to)
 	}
 	return "environment changed"
 }

@@ -87,10 +87,10 @@ func (d *Driver) applyService(ctx context.Context, ch *target.Change) error {
 		// revision from being the one a later deploy compares against.
 		if rbErr := d.update(ctx, ch.Target.Name, p.previous, ""); rbErr != nil {
 			return errors.Join(
-				fmt.Errorf("rolling back to %s also failed", orNone(ch.FromVersion)),
+				fmt.Errorf("rolling back to %s also failed", target.VersionOrUnknown(ch.FromVersion)),
 				err, rbErr)
 		}
-		return fmt.Errorf("rolled back to %s: %w", orNone(ch.FromVersion), err)
+		return fmt.Errorf("rolled back to %s: %w", target.VersionOrUnknown(ch.FromVersion), err)
 	}
 	return nil
 }
@@ -164,8 +164,31 @@ func nextTemplate(
 	if err != nil {
 		return nil, "", err
 	}
+
+	// The version, written where the revision keeps it, because the image will
+	// not: Cloud Run stores a container image as the digest the tag resolved to,
+	// so a revision read back names an image without naming a release. The
+	// service's template does keep the tag, but with two live revisions it
+	// belongs to whichever was created last — the abandoned one, after a failed
+	// deploy — which is the whole reason a blue-green plan reads the serving
+	// revision instead. This is the note that survives that read.
+	//
+	// An annotation rather than a label: a label value may not hold a dot or a
+	// capital, and `v1.2.3` is a tag someone will use. Annotations are the field
+	// the API sets aside for exactly this, and Cloud Run rejects only its own
+	// reserved namespaces.
+	if next.Annotations == nil {
+		next.Annotations = map[string]string{}
+	}
+	next.Annotations[versionAnnotation] = version
+
 	return next, from, nil
 }
+
+// versionAnnotation names the release a revision is running. Prefixed, because
+// an unprefixed annotation key is the API's to give meaning to and this one is
+// the tool's.
+const versionAnnotation = "evolve-deploy/version"
 
 // retag rewrites one container of an already-copied list in place: the image
 // tag, and the environment when the config declares one.
@@ -331,7 +354,7 @@ func findContainer(containers []*runpb.Container, name string) *runpb.Container 
 
 func reason(from, to string) string {
 	if from != to {
-		return fmt.Sprintf("version %s -> %s", orNone(from), to)
+		return fmt.Sprintf("version %s -> %s", target.VersionOrUnknown(from), to)
 	}
 	return "environment changed"
 }

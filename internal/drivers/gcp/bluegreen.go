@@ -92,14 +92,20 @@ func (d *Driver) sidesOf(
 	// not the tag in the service's template. With two live revisions the
 	// template is whichever was created last, which after a failed deploy is
 	// the one that was thrown away.
+	//
+	// It can come back empty, and on Cloud Run more often than not: a revision
+	// records the image as the digest the tag resolved to, and keeps no note of
+	// what was written — there is no `client.knative.dev/user-image` on a
+	// revision this tool can read. So the side that is serving is known, its
+	// address is known, and the version on it is not. That is reported as
+	// unknown and deployed over, which is the safe end of the trade; the
+	// alternative was the digest hex displayed as a release.
 	if sides.Active.Revision != "" {
-		if containers, err := d.revisionContainers(ctx, t.Name, sides.Active.Revision); err == nil {
+		if rev, err := d.getRevision(ctx, t.Name, sides.Active.Revision); err == nil {
 			name, err := target.PickContainer(
-				containerNames(containers), t.Container, cloudRunContainer)
+				containerNames(rev.GetContainers()), t.Container, cloudRunContainer)
 			if err == nil {
-				if c := findContainer(containers, name); c != nil {
-					sides.Active.Version = image.Tag(c.GetImage())
-				}
+				sides.Active.Version = revisionVersion(rev, name)
 			}
 		} else {
 			slog.Debug("could not read the serving revision", "service", t.Name,
@@ -328,6 +334,19 @@ func (d *Driver) revisionContainers(
 	ctx context.Context,
 	service, revision string,
 ) ([]*runpb.Container, error) {
+	got, err := d.getRevision(ctx, service, revision)
+	if err != nil {
+		return nil, err
+	}
+	return got.GetContainers(), nil
+}
+
+// getRevision reads one revision whole, for the callers that want the version
+// annotation beside the containers and would otherwise read it twice.
+func (d *Driver) getRevision(
+	ctx context.Context,
+	service, revision string,
+) (*runpb.Revision, error) {
 	got, err := d.revisions.GetRevision(ctx, &runpb.GetRevisionRequest{
 		Name: d.serviceName(service) + "/revisions/" + revision,
 	})
@@ -337,7 +356,25 @@ func (d *Driver) revisionContainers(
 	if len(got.GetContainers()) == 0 {
 		return nil, fmt.Errorf("revision %s has no containers", revision)
 	}
-	return got.GetContainers(), nil
+	return got, nil
+}
+
+// revisionVersion reads the release a revision is running.
+//
+// The annotation is the answer where there is one, because the image is not:
+// Cloud Run records it as a digest, and the hex on its own is not a version. The
+// tag is still tried after it, for the revision Terraform created and every
+// revision written before this tool started leaving the note — there the image
+// may well carry a tag. Nothing found means unknown, which is reported as such
+// and deployed over rather than assumed current.
+func revisionVersion(rev *runpb.Revision, container string) string {
+	if v := rev.GetAnnotations()[versionAnnotation]; v != "" {
+		return v
+	}
+	if c := findContainer(rev.GetContainers(), container); c != nil {
+		return image.Tag(c.GetImage())
+	}
+	return ""
 }
 
 // Stage creates the new revision and points the idle tag at it.
@@ -584,13 +621,11 @@ func (d *Driver) Traffic(ctx context.Context, t *config.Target) ([]target.Traffi
 				runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST,
 		}
 		if e.Revision != "" {
-			if containers, err := d.revisionContainers(ctx, t.Name, e.Revision); err == nil {
+			if rev, err := d.getRevision(ctx, t.Name, e.Revision); err == nil {
 				name, err := target.PickContainer(
-					containerNames(containers), t.Container, cloudRunContainer)
+					containerNames(rev.GetContainers()), t.Container, cloudRunContainer)
 				if err == nil {
-					if c := findContainer(containers, name); c != nil {
-						e.Version = image.Tag(c.GetImage())
-					}
+					e.Version = revisionVersion(rev, name)
 				}
 			}
 		}

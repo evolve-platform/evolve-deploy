@@ -267,7 +267,15 @@ func agreeOnRollback(steps []rollbackStep) error {
 	versions := map[string]bool{}
 	for _, s := range steps {
 		sides[s.to.Label] = true
-		versions[s.to.Version] = true
+		// A version the platform keeps no record of is the absence of an
+		// answer, not a different one. Counting it as a value would refuse the
+		// rollback for the one reason nobody can do anything about, and it
+		// would do it exactly when it hurts: on a Cloud Run service whose idle
+		// revision predates the annotation the version is now stamped in, so
+		// one target reads a tag and the next reads nothing.
+		if s.to.Version != "" {
+			versions[s.to.Version] = true
+		}
 	}
 
 	if len(sides) > 1 {
@@ -371,7 +379,7 @@ func runRollback(
 			continue
 		}
 		fmt.Fprintf(out, "  %-40s now on %s %s\n",
-			s.target.Label(), label, orNone(s.to.Version))
+			s.target.Label(), label, target.VersionOrUnknown(s.to.Version))
 
 		// The side just rolled away from is the one that was wrong, and it goes
 		// on costing money until something switches it off. Point starts what it
@@ -400,8 +408,8 @@ func describeSteps(steps []rollbackStep) string {
 	var b strings.Builder
 	for _, s := range steps {
 		fmt.Fprintf(&b, "  %-40s %s %s -> %s %s\n", s.target.Label(),
-			s.from.Label, orNone(s.from.Version),
-			s.to.Label, orNone(s.to.Version))
+			s.from.Label, target.VersionOrUnknown(s.from.Version),
+			s.to.Label, target.VersionOrUnknown(s.to.Version))
 	}
 	return b.String()
 }

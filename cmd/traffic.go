@@ -127,7 +127,7 @@ func showTraffic(
 				serving = "  <- serving"
 			}
 			fmt.Fprintf(out, "  %-8s %-40s %-10s %3d%%%s\n",
-				orNone(e.Label), orNone(revision), orNone(e.Version), e.Weight, serving)
+				orNone(e.Label), orNone(revision), target.VersionOrUnknown(e.Version), e.Weight, serving)
 		}
 		for _, label := range t.Strategy.Labels {
 			if !seen[label] {

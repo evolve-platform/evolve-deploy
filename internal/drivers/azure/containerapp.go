@@ -139,10 +139,10 @@ func (d *Driver) applyApp(ctx context.Context, ch *target.Change) error {
 	if err := d.patchApp(ctx, ch.Target.Name, p.containers, readyTimeout); err != nil {
 		if rbErr := d.patchApp(ctx, ch.Target.Name, p.previous, revertTimeout); rbErr != nil {
 			return errors.Join(
-				fmt.Errorf("rolling back to %s also failed", orNone(ch.FromVersion)),
+				fmt.Errorf("rolling back to %s also failed", target.VersionOrUnknown(ch.FromVersion)),
 				err, rbErr)
 		}
-		return fmt.Errorf("rolled back to %s: %w", orNone(ch.FromVersion), err)
+		return fmt.Errorf("rolled back to %s: %w", target.VersionOrUnknown(ch.FromVersion), err)
 	}
 	return nil
 }
@@ -591,7 +591,7 @@ func diffContainers(
 
 func reason(from, to string) string {
 	if from != to {
-		return fmt.Sprintf("version %s -> %s", orNone(from), to)
+		return fmt.Sprintf("version %s -> %s", target.VersionOrUnknown(from), to)
 	}
 	return "environment changed"
 }

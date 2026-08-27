@@ -485,7 +485,7 @@ func ecsReason(
 ) string {
 	var parts []string
 	if from != to {
-		parts = append(parts, fmt.Sprintf("version %s -> %s", orNone(from), to))
+		parts = append(parts, fmt.Sprintf("version %s -> %s", target.VersionOrUnknown(from), to))
 	}
 
 	w, h := want.container(container), have.container(container)

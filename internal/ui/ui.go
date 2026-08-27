@@ -67,7 +67,7 @@ func RenderPlan(w io.Writer, p *plan.Plan) {
 			} else {
 				fmt.Fprintf(w, "  %-*s %s -> %s\n", width,
 					ch.Target.Label(),
-					orNone(ch.FromVersion), ch.ToVersion)
+					target.VersionOrUnknown(ch.FromVersion), ch.ToVersion)
 			}
 
 			// The reason is only worth a line when it says something the
@@ -120,7 +120,7 @@ func labelWidth(p *plan.Plan) int {
 func Width(p *plan.Plan) int { return labelWidth(p) }
 
 func versionReason(ch *target.Change) string {
-	return fmt.Sprintf("version %s -> %s", orNone(ch.FromVersion), ch.ToVersion)
+	return fmt.Sprintf("version %s -> %s", target.VersionOrUnknown(ch.FromVersion), ch.ToVersion)
 }
 
 func renderEnv(w io.Writer, ch *target.Change) {
@@ -161,7 +161,7 @@ func renderRollout(w io.Writer, width int, cp *plan.ServicePlan, ch *target.Chan
 	// between trusting it and hoping so — and the three answers are genuinely
 	// different, so there are three lines rather than one hedged one.
 	fmt.Fprintf(w, "  %-*s rollback is %s %s (%s)\n", width, "",
-		ch.Sides.Active.Label, orNone(ch.FromVersion), ch.Fallback)
+		ch.Sides.Active.Label, target.VersionOrUnknown(ch.FromVersion), ch.Fallback)
 }
 
 // Summary is the one-line result, for the end of a pipeline log.
@@ -185,11 +185,4 @@ func pluralise(n int, noun string) string {
 		return fmt.Sprintf("1 %s", noun)
 	}
 	return fmt.Sprintf("%d %ss", n, noun)
-}
-
-func orNone(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "(none)"
-	}
-	return s
 }

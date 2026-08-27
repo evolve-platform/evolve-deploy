@@ -373,3 +373,21 @@ type TrafficEntry struct {
 	// revision.
 	Latest bool
 }
+
+// VersionOrUnknown renders a version for a human.
+//
+// It is empty when the platform keeps no record of what is running rather than
+// when nothing is: a Cloud Run revision stores its image as the digest the tag
+// resolved to, and one written before this tool started stamping the version on
+// it has nothing else to answer with. So the word is unknown and not none —
+// something is serving, and this is the tool unable to say which release it is.
+//
+// Whatever reads a version has to cope with that rather than refuse. Not
+// knowing is a gap in what can be displayed; it is never a reason to stop a
+// deploy or a rollback that would otherwise be correct.
+func VersionOrUnknown(s string) string {
+	if s == "" {
+		return "(unknown)"
+	}
+	return s
+}
