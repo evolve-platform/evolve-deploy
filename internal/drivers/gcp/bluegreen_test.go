@@ -171,31 +171,73 @@ func TestWeightsAlwaysPin(t *testing.T) {
 }
 
 func TestPointTraffic(t *testing.T) {
-	got, err := pointTraffic([]*runpb.TrafficTarget{
+	got, aside, err := pointTraffic([]*runpb.TrafficTarget{
 		ttLatest("green", 100),
 		tt("blue", "site-00001", 0),
-	}, "blue")
+	}, nil, "blue")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, w := range got {
-		want := int32(0)
-		if w.GetTag() == "blue" {
-			want = 100
-		}
-		if w.GetPercent() != want {
-			t.Errorf("%s = %d%%, want %d%%", w.GetTag(), w.GetPercent(), want)
-		}
-		// Unpinned on the way out: "whatever is newest" cannot be a resting
-		// state for either side.
-		if w.GetType() != runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION {
-			t.Errorf("%s is still %s", w.GetTag(), w.GetType())
-		}
+	// One entry on the way out. Green keeps no tag, because a tag is an address
+	// and an address is what stops a revision being retired.
+	if len(got) != 1 || got[0].GetTag() != "blue" || got[0].GetPercent() != weightAll {
+		t.Fatalf("got %s", describeTraffic(got))
+	}
+	// Pinned on the way out: "whatever is newest" cannot be a resting state for
+	// either side.
+	if got[0].GetType() != runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION {
+		t.Errorf("blue is still %s", got[0].GetType())
+	}
+	// And the side that lost its tag is handed back, so the caller can record it
+	// before it becomes unfindable.
+	if aside.Label != "green" {
+		t.Errorf("aside = %+v, want green", aside)
 	}
 
-	if _, err := pointTraffic([]*runpb.TrafficTarget{tt("blue", "site-00001", 100)}, "green"); err == nil {
-		t.Error("pointing at a tag that does not exist should fail")
+	if _, _, err := pointTraffic(
+		[]*runpb.TrafficTarget{tt("blue", "site-00001", 100)}, nil, "green",
+	); err == nil {
+		t.Error("pointing at a side nothing names should fail")
+	}
+}
+
+// The rollback path: after a switch the idle side has no tag at all, so the only
+// thing that knows where blue went is the note on the service.
+func TestPointTrafficUsesTheRecordedSide(t *testing.T) {
+	got, aside, err := pointTraffic(
+		[]*runpb.TrafficTarget{tt("green", "site-00002", 100)},
+		map[string]string{rollbackAnnotation: "blue=site-00001"},
+		"blue",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %s", describeTraffic(got))
+	}
+	if got[0].GetTag() != "blue" || got[0].GetRevision() != "site-00001" {
+		t.Errorf("got tag %q revision %q", got[0].GetTag(), got[0].GetRevision())
+	}
+	if got[0].GetPercent() != weightAll {
+		t.Errorf("blue = %d%%, want all of it", got[0].GetPercent())
+	}
+	// Rolling back makes green the side to come back to, and nothing else will
+	// record that.
+	if aside.Label != "green" || aside.Revision != "site-00002" {
+		t.Errorf("aside = %+v, want green on site-00002", aside)
+	}
+}
+
+// A note for the other side is not an answer for this one.
+func TestPointTrafficWillNotBorrowTheOtherSidesNote(t *testing.T) {
+	_, _, err := pointTraffic(
+		[]*runpb.TrafficTarget{tt("green", "site-00002", 100)},
+		map[string]string{rollbackAnnotation: "green=site-00002"},
+		"blue",
+	)
+	if err == nil || !strings.Contains(err.Error(), "nothing names a revision") {
+		t.Errorf("error = %v", err)
 	}
 }
 
@@ -434,5 +476,69 @@ func TestRevisionVersionFallsBackToTheTag(t *testing.T) {
 	rev.Containers[0].Image = "europe-west4-docker.pkg.dev/evolve-mgmt/evolve/purchase@sha256:bdfeeb04"
 	if got := revisionVersion(rev, "app"); got != "" {
 		t.Errorf("revisionVersion = %q, want empty", got)
+	}
+}
+
+// Once a switch has dropped the idle tag, the note on the service is the only
+// thing that knows where the other side went.
+func TestResolveIdle(t *testing.T) {
+	cases := []struct {
+		name        string
+		sides       *target.Sides
+		note        string
+		wantIdleRev string
+	}{{
+		name:        "the note names the idle side",
+		sides:       &target.Sides{Active: target.Side{Label: "green", Revision: "site-00002"}, Idle: target.Side{Label: "blue"}},
+		note:        "blue=site-00001",
+		wantIdleRev: "site-00001",
+	}, {
+		// The traffic block is the better source and does not need the note. A
+		// service deployed before this existed still has both tags.
+		name:        "the block already answered",
+		sides:       &target.Sides{Active: target.Side{Label: "green", Revision: "site-00002"}, Idle: target.Side{Label: "blue", Revision: "site-00001"}},
+		note:        "blue=site-00009",
+		wantIdleRev: "site-00001",
+	}, {
+		// A switch that died between its two writes leaves this. Believing it
+		// would make one revision both sides at once.
+		name:        "the note names the serving revision",
+		sides:       &target.Sides{Active: target.Side{Label: "blue", Revision: "site-00001"}, Idle: target.Side{Label: "green"}},
+		note:        "green=site-00001",
+		wantIdleRev: "",
+	}, {
+		name:        "the note is for the other side",
+		sides:       &target.Sides{Active: target.Side{Label: "green", Revision: "site-00002"}, Idle: target.Side{Label: "blue"}},
+		note:        "green=site-00002",
+		wantIdleRev: "",
+	}, {
+		name:        "no note at all",
+		sides:       &target.Sides{Active: target.Side{Label: "green", Revision: "site-00002"}, Idle: target.Side{Label: "blue"}},
+		note:        "",
+		wantIdleRev: "",
+	}, {
+		name:        "a note nobody can parse",
+		sides:       &target.Sides{Active: target.Side{Label: "green", Revision: "site-00002"}, Idle: target.Side{Label: "blue"}},
+		note:        "blue=",
+		wantIdleRev: "",
+	}}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resolveIdle(c.sides, map[string]string{rollbackAnnotation: c.note})
+			if c.sides.Idle.Revision != c.wantIdleRev {
+				t.Errorf("idle revision = %q, want %q", c.sides.Idle.Revision, c.wantIdleRev)
+			}
+		})
+	}
+}
+
+// The note has to survive a round trip, because a label on its own does not say
+// which revision it meant — it alternates every release.
+func TestRollbackNoteRoundTrip(t *testing.T) {
+	note := formatRollback(target.Side{Label: "blue", Revision: "site-00001"})
+	label, revision, ok := parseRollback(map[string]string{rollbackAnnotation: note})
+	if !ok || label != "blue" || revision != "site-00001" {
+		t.Errorf("parseRollback(%q) = (%q, %q, %v)", note, label, revision, ok)
 	}
 }

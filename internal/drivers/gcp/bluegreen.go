@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -32,8 +33,12 @@ type bgPayload struct {
 	// planServiceBlueGreen.
 	template *runpb.RevisionTemplate
 
-	// traffic is the block as it was found, so Abandon can put it back exactly.
-	traffic []*runpb.TrafficTarget
+	// annotations is the service's own annotation map as the plan found it, so
+	// the rollback note can be written without dropping whatever else is in
+	// there: a masked write replaces the map rather than merging into it. Read
+	// here rather than again at the switch, because the switch is the one place
+	// where an extra call is time a release spends half-done.
+	annotations map[string]string
 
 	// staged is filled in by Stage and read by Switch and Abandon.
 	staged string
@@ -52,10 +57,66 @@ func (d *Driver) Routable(t config.TargetType) bool {
 // Pointable: the traffic block is the tool's own here too.
 func (d *Driver) Pointable(t config.TargetType) bool { return d.Routable(t) }
 
-// Fallback: nothing is switched off here and nothing has to be. A Cloud Run
-// revision with no traffic scales itself to zero, and traffic arriving is what
+// Fallback: the switch takes the tag off the side that stops serving, so it
+// leaves the traffic block and Cloud Run retires it. Traffic arriving is what
 // brings it back — a cold start, handled by the platform.
+//
+// This used to be a claim rather than a fact. A tag is an address, and
+// `blue---service.run.app` answers whether or not any traffic is split that way,
+// so an idle side that kept its tag was never retired and went on holding the
+// template's `min_instance_count` floor for as long as it kept it. See
+// rollbackAnnotation for where the revision name lives now.
 func (d *Driver) Fallback(*config.Target) string { return "scaled to zero" }
+
+// rollbackAnnotation names the side a rollback would go back to.
+//
+// On the service, because a revision cannot carry it: revisions are immutable,
+// and what has to be named is the revision that stopped serving a moment ago.
+// Service annotations are the field the API sets aside for external tools, and a
+// write masked to them touches no template — so it creates no revision, which is
+// the whole reason this is affordable at every switch.
+//
+// The traffic block still wins where it has an answer. That is what carries a
+// service deployed before this existed: its idle tag is still there, still names
+// a revision, and no note is needed to read it.
+const rollbackAnnotation = "evolve-deploy/rollback"
+
+// resolveIdle fills in the idle side's revision from the note, for the service
+// that has no idle tag left to read it from.
+//
+// The block wins where it has an answer, which is what carries a service
+// deployed before the note existed. Two guards on believing the note otherwise:
+// the label has to be the side this config expects to be idle, and it must not
+// name the revision that is serving. The second one earns its keep — a switch
+// writes the note before it moves the traffic, so a run that died between the
+// two leaves a note naming the side still in front of it, and taking that at
+// face value would report one revision as both sides at once.
+func resolveIdle(sides *target.Sides, annotations map[string]string) {
+	if sides.Idle.Revision != "" {
+		return
+	}
+	label, revision, ok := parseRollback(annotations)
+	if !ok || label != sides.Idle.Label || revision == sides.Active.Revision {
+		return
+	}
+	sides.Idle.Revision = revision
+}
+
+// formatRollback and parseRollback keep the encoding in one place. The revision
+// goes in beside the label because the label on its own does not say which
+// revision it meant — it alternates every release, and a note that survived one
+// release too many would name the wrong one with perfect confidence.
+func formatRollback(side target.Side) string {
+	return side.Label + "=" + side.Revision
+}
+
+func parseRollback(annotations map[string]string) (label, revision string, ok bool) {
+	label, revision, ok = strings.Cut(annotations[rollbackAnnotation], "=")
+	if !ok || label == "" || revision == "" {
+		return "", "", false
+	}
+	return label, revision, true
+}
 
 // Sides reads the current split off the service.
 func (d *Driver) Sides(ctx context.Context, t *config.Target) (*target.Sides, error) {
@@ -87,6 +148,8 @@ func (d *Driver) sidesOf(
 					"revision to pin that to", t.Name)
 		}
 	}
+
+	resolveIdle(sides, svc.GetAnnotations())
 
 	// The version that is running is the tag on the revision that is serving,
 	// not the tag in the service's template. With two live revisions the
@@ -391,9 +454,12 @@ func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, 
 		slog.Debug("pinning the active tag before staging",
 			"service", name, "tag", ch.Sides.Active.Label,
 			"revision", ch.Sides.Active.Revision)
+		// The active side and nothing else. The idle one may be named by the
+		// note rather than by a tag, and writing it back here would re-tag the
+		// revision the last switch deliberately untagged — warm again, for the
+		// minute until the write below drops it.
 		if _, err := d.patchTraffic(ctx, name, weights(
 			trafficEntry{ch.Sides.Active, weightAll},
-			trafficEntry{ch.Sides.Idle, weightNone},
 		)); err != nil {
 			return nil, fmt.Errorf("pinning %s before staging: %w", ch.Sides.Active.Label, err)
 		}
@@ -438,26 +504,48 @@ func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, 
 	}, nil
 }
 
-// Switch hands the staged side all of the traffic, in one write.
+// Switch hands the staged side all of the traffic and takes the tag off the side
+// that was serving, so that one retires.
+//
+// Two writes, and the order is the argument. The note goes first because it is
+// what a rollback reads: a switch that moved the traffic without leaving it
+// behind would be a release with nowhere to go back to. The other way round is
+// harmless — a note naming the side that is still serving is a rollback to where
+// you already are, and sidesOf declines to read it.
 func (d *Driver) Switch(ctx context.Context, ch *target.Change) error {
 	p := ch.Payload.(*bgPayload)
-	_, err := d.patchTraffic(ctx, ch.Target.Name, weights(
+	name := ch.Target.Name
+
+	if err := d.patchRollback(ctx, name, p.annotations, formatRollback(ch.Sides.Active)); err != nil {
+		return fmt.Errorf("recording %s as the side to roll back to: %w",
+			ch.Sides.Active.Label, err)
+	}
+
+	// One entry, so the side that was serving leaves the block. That is what
+	// retires it: nothing routes to a revision with neither traffic nor a tag,
+	// and a revision nothing routes to stops costing anything — including the
+	// per-revision minimum Terraform may have put on the template.
+	_, err := d.patchTraffic(ctx, name, weights(
 		trafficEntry{target.Side{Label: ch.Sides.Idle.Label, Revision: p.staged}, weightAll},
-		trafficEntry{ch.Sides.Active, weightNone},
 	))
 	return err
 }
 
-// Abandon restores the traffic block exactly as it was.
+// Abandon puts all the traffic back on the side that was already serving.
 //
-// Nothing is deleted. A Cloud Run revision with no traffic scales itself to
-// zero and costs nothing, and deleting it would throw away the only copy of a
+// Nothing is deleted. A Cloud Run revision that nothing routes to scales itself
+// to zero and costs nothing, and deleting it would throw away the only copy of a
 // template — where Container Apps can deactivate and activate again, this is
 // one-way. The revision is left where it is and the next release replaces it.
+//
+// The active side is written on its own, so the revision that was just staged
+// leaves the block and retires with it. A failed attempt is not something a
+// rollback would ever ask for, and it should not go on holding an instance while
+// it waits to be replaced. The note is not touched: which side to go back to did
+// not change, because the traffic never moved.
 func (d *Driver) Abandon(ctx context.Context, ch *target.Change) error {
 	_, err := d.patchTraffic(ctx, ch.Target.Name, weights(
 		trafficEntry{ch.Sides.Active, weightAll},
-		trafficEntry{ch.Sides.Idle, weightNone},
 	))
 	return err
 }
@@ -465,21 +553,23 @@ func (d *Driver) Abandon(ctx context.Context, ch *target.Change) error {
 // Settle is where the Container Apps driver deactivates the previous revision,
 // and here there is nothing to deactivate.
 //
-// Switch already wrote the canonical two-entry block, which drops any leftover
-// entry a run that died halfway left behind — and that is the whole cleanup on
-// Cloud Run. A revision that carries no traffic scales itself to zero, so the
-// side that stopped serving stops costing anything without being told.
+// Switch already wrote the block down to the one serving entry, which drops both
+// the previous side and any leftover a run that died halfway left behind — and
+// that is the whole cleanup on Cloud Run. A revision nothing routes to is retired
+// by the platform, so the side that stopped serving stops costing anything
+// without being told, whatever minimum the template carries.
 //
-// Unless the template carries revision-level minimum instances, which is why
-// planServiceBlueGreen refuses keep_warm here: that setting belongs to
-// Terraform and this tool cannot honour a promise it does not write.
+// Which is why planServiceBlueGreen still refuses keep_warm: warmth here is
+// `scaling.min_instance_count` on the template, Terraform owns it, and the switch
+// now actively takes away the address that was keeping the idle side up.
 func (d *Driver) Settle(context.Context, *target.Change) error { return nil }
 
-// Tidy trims the traffic block back to the two tagged entries.
+// Tidy trims the traffic block back to the sides the config names.
 //
 // The Container Apps version of this switches revisions off. Here the block
 // itself is the only state worth tidying: a stray tag from a run that died
-// halfway is a URL that answers, pointing at a version nobody chose.
+// halfway is a URL that answers, pointing at a version nobody chose — and, on a
+// service with a per-revision minimum, an instance still being paid for.
 func (d *Driver) Tidy(ctx context.Context, t *config.Target) error {
 	svc, err := d.getService(ctx, t.Name)
 	if err != nil {
@@ -545,23 +635,41 @@ func (d *Driver) Point(ctx context.Context, t *config.Target, label string) erro
 		return err
 	}
 
-	next, err := pointTraffic(svc.GetTraffic(), label)
+	next, aside, err := pointTraffic(svc.GetTraffic(), svc.GetAnnotations(), label)
 	if err != nil {
 		return fmt.Errorf("cloud run service %s: %w", t.Name, err)
+	}
+
+	// Whatever this takes out of the block has to be findable afterwards, and
+	// for the same reason as at a switch: the note is written before the traffic
+	// moves, so the failure that leaves a stale note is the harmless one.
+	if aside.Revision != "" {
+		if err := d.patchRollback(
+			ctx, t.Name, svc.GetAnnotations(), formatRollback(aside),
+		); err != nil {
+			return fmt.Errorf("cloud run service %s: recording %s as the side to roll "+
+				"back to: %w", t.Name, aside.Label, err)
+		}
 	}
 	_, err = d.patchTraffic(ctx, t.Name, next)
 	return err
 }
 
-// pointTraffic rewrites a block so the named tag carries everything.
+// pointTraffic rewrites a block so the named side carries everything, and
+// reports which side that took out of the block so the caller can record it.
+//
+// The result is one entry. Every other side loses its tag, which is what retires
+// it — the same shape a switch leaves behind, so pointing at a side and then
+// deploying do not disagree about what the resting state is.
 func pointTraffic(
 	traffic []*runpb.TrafficTarget,
+	annotations map[string]string,
 	label string,
-) ([]*runpb.TrafficTarget, error) {
+) (next []*runpb.TrafficTarget, aside target.Side, err error) {
 	var (
-		out   []*runpb.TrafficTarget
-		found bool
-		names []string
+		revision string
+		names    []string
+		others   []target.Side
 	)
 	for _, w := range traffic {
 		if w == nil {
@@ -575,28 +683,43 @@ func pointTraffic(
 			continue
 		}
 		names = append(names, tag)
-
-		weight := weightNone
 		if tag == label {
-			weight = weightAll
-			found = true
+			revision = shortRevision(w.GetRevision())
+			continue
 		}
-		out = append(out, &runpb.TrafficTarget{
-			// A pin, if it was not one already: "whatever is newest" cannot be
-			// a resting state for either side.
-			Type:     runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION,
-			Revision: shortRevision(w.GetRevision()),
-			Tag:      tag,
-			Percent:  weight,
-		})
+		others = append(others, target.Side{Label: tag, Revision: shortRevision(w.GetRevision())})
 	}
 
-	if !found {
-		sort.Strings(names)
-		return nil, fmt.Errorf("no traffic tag named %q (found %s)",
-			label, orNone(strings.Join(names, ", ")))
+	// The side asked for may have no tag in the block at all. That is the
+	// resting state now rather than a broken one, so the note is the other place
+	// to look — and the only place, once a switch has dropped the tag.
+	if revision == "" {
+		if noted, rev, ok := parseRollback(annotations); ok && noted == label {
+			revision, names = rev, append(names, label+" (recorded)")
+		}
 	}
-	return out, nil
+	if revision == "" {
+		sort.Strings(names)
+		return nil, target.Side{}, fmt.Errorf(
+			"nothing names a revision for %q: the traffic block has %s, and no side is "+
+				"recorded to roll back to", label, orNone(strings.Join(names, ", ")))
+	}
+
+	// Exactly one other side is an unambiguous thing to record. Two is a block
+	// somebody has been editing, and guessing which half of it a rollback should
+	// aim at is the decision this driver refuses everywhere else.
+	if len(others) == 1 {
+		aside = others[0]
+	}
+
+	return []*runpb.TrafficTarget{{
+		// A pin, if it was not one already: "whatever is newest" cannot be a
+		// resting state for either side.
+		Type:     runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION,
+		Revision: revision,
+		Tag:      label,
+		Percent:  weightAll,
+	}}, aside, nil
 }
 
 // Traffic reads the split as it is. Errors reading a revision are swallowed:
@@ -608,7 +731,24 @@ func (d *Driver) Traffic(ctx context.Context, t *config.Target) ([]target.Traffi
 		return nil, err
 	}
 
+	version := func(revision string) string {
+		if revision == "" {
+			return ""
+		}
+		rev, err := d.getRevision(ctx, t.Name, revision)
+		if err != nil {
+			return ""
+		}
+		name, err := target.PickContainer(
+			containerNames(rev.GetContainers()), t.Container, cloudRunContainer)
+		if err != nil {
+			return ""
+		}
+		return revisionVersion(rev, name)
+	}
+
 	var out []target.TrafficEntry
+	seen := map[string]bool{}
 	for _, w := range svc.GetTraffic() {
 		if w == nil {
 			continue
@@ -620,17 +760,23 @@ func (d *Driver) Traffic(ctx context.Context, t *config.Target) ([]target.Traffi
 			Latest: w.GetType() ==
 				runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST,
 		}
-		if e.Revision != "" {
-			if rev, err := d.getRevision(ctx, t.Name, e.Revision); err == nil {
-				name, err := target.PickContainer(
-					containerNames(rev.GetContainers()), t.Container, cloudRunContainer)
-				if err == nil {
-					e.Version = revisionVersion(rev, name)
-				}
-			}
-		}
+		e.Version = version(e.Revision)
+		seen[e.Label] = true
 		out = append(out, e)
 	}
+
+	// The idle side is not in the block once a switch has dropped its tag, and
+	// this is the command someone runs to see both sides. So the note is read
+	// too, and what it names is shown for what it is: a side at no traffic with
+	// no address of its own, kept because a rollback needs somewhere to go.
+	if label, revision, ok := parseRollback(svc.GetAnnotations()); ok && !seen[label] {
+		out = append(out, target.TrafficEntry{
+			Label:    label,
+			Revision: revision,
+			Version:  version(revision),
+		})
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
 	return out, nil
 }
@@ -666,6 +812,28 @@ func (d *Driver) patchTraffic(
 ) (*runpb.Service, error) {
 	return d.updateMasked(ctx, "patch cloud run traffic", name,
 		&runpb.Service{Name: d.serviceName(name), Traffic: traffic}, "traffic")
+}
+
+// patchRollback writes the rollback note and nothing else.
+//
+// The existing annotations are merged rather than replaced because a masked write
+// to a map field overwrites the map — naming `annotations` in the mask and
+// sending one key would drop every other annotation on the service. They come
+// from the caller, which read them a moment ago, so that no read is added to the
+// switch.
+func (d *Driver) patchRollback(
+	ctx context.Context,
+	name string,
+	existing map[string]string,
+	note string,
+) error {
+	merged := make(map[string]string, len(existing)+1)
+	maps.Copy(merged, existing)
+	merged[rollbackAnnotation] = note
+
+	_, err := d.updateMasked(ctx, "patch cloud run rollback note", name,
+		&runpb.Service{Name: d.serviceName(name), Annotations: merged}, "annotations")
+	return err
 }
 
 // updateMasked is the write both halves share, including the reconcile wait and
@@ -727,10 +895,13 @@ func (d *Driver) planServiceBlueGreen(
 	if t.Strategy.KeepsWarm() {
 		return nil, fmt.Errorf(
 			"cloud run service %s: `keep_warm` cannot be honoured here.\n"+
-				"    A revision with no traffic scales itself to zero, and keeping one warm is\n"+
-				"    `scaling.min_instance_count` on the template, which Terraform owns — note\n"+
-				"    that a service-level minimum does not apply to a tagged revision.\n"+
-				"    Remove the setting, or set it on the template and leave it out here",
+				"    The switch takes the tag off the side that stops serving, so nothing routes\n"+
+				"    to it and Cloud Run retires it — which is what makes a released side cost\n"+
+				"    nothing, and also what this setting would have to undo. Keeping one warm is\n"+
+				"    `scaling.min_instance_count`, which Terraform owns: on the template it\n"+
+				"    applies per revision, and at service level it is divided over the revisions\n"+
+				"    that have traffic, so an idle side gets none of it either way.\n"+
+				"    Remove the setting; a rollback starts the side it goes back to",
 			t.Name)
 	}
 
@@ -810,7 +981,7 @@ func (d *Driver) planServiceBlueGreen(
 		Sides:       sides,
 		Carry:       carry,
 		PublicURL:   svc.GetUri(),
-		Payload:     &bgPayload{template: next, traffic: svc.GetTraffic()},
+		Payload:     &bgPayload{template: next, annotations: svc.GetAnnotations()},
 	}, nil
 }
 
