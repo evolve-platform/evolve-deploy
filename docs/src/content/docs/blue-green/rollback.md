@@ -45,9 +45,15 @@ is deliberately something you have to ask for.
 
 ### It starts the side first
 
-The previous version is normally stopped after a switch — it keeps its label,
-not its replicas — so `rollback` starts it and waits for it before moving
-anything.
+The previous version is normally stopped after a switch — it stays reachable as
+the rollback target, but it is not running — so `rollback` starts it and waits
+for it before moving anything.
+
+On Cloud Run what stays behind is a note rather than a label: the switch drops
+the idle tag so the revision can be retired, and the revision to come back to is
+recorded on the service. `rollback` re-tags it and moves the traffic in one go,
+which means there is no address to check the old version on beforehand. See [the
+per-cloud differences](../clouds/).
 
 That is a container start, not the instant flip you get with
 [`keep_warm`](../overview/#the-idle-side-is-switched-off), and it is why the

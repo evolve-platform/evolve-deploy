@@ -14,8 +14,9 @@ rollback is. It is worth knowing before you pick a cloud to be brave on.
 | who moves the traffic | the tool | the tool | ECS |
 | the sides | labels, alternating | tags, alternating | roles in one release |
 | the staged address | `<app>---<label>.<domain>` | from the API | `test_url`, written down |
-| after the switch | previous stopped | previous scales to zero | previous terminated |
+| after the switch | previous stopped | previous untagged, then retired | previous terminated |
 | cost of the idle side | zero, or `keep_warm` | zero | zero, or `bake_time` |
+| the idle side's address | `<app>---<label>.<domain>` | none — recorded, not addressable | none |
 | `traffic --to <label>` | yes | yes | no — no side to name |
 | `rollback` | any time | any time | until the release finishes |
 | `strategy.env` per side | yes | yes | no |
@@ -41,21 +42,37 @@ The same model with fewer preconditions. There is no revision mode to switch on
 bootstrap the traffic block with a tag on the side that serves. The tagged URL
 comes back from the API rather than being assembled.
 
-Two differences worth knowing:
+Three differences worth knowing:
 
-**The idle side costs nothing without being switched off.** A revision with no
-traffic scales itself to zero.
+**The switch takes the tag off the side it retires.** A tag is an address:
+`blue---service.run.app` answers whether or not any traffic is split that way, so
+a revision that keeps its tag is never retired and goes on holding whatever
+`min_instance_count` the template carries. Dropping the tag is what lets it
+scale to zero. The revision a rollback needs is recorded in an
+`evolve-deploy/rollback` annotation on the service instead — it cannot live on
+the revision, because revisions are immutable and the one to name is the one that
+stopped serving a moment ago.
+
+The cost of that: **the idle side has no address of its own.** There is no URL to
+curl the previous version on before deciding to go back to it. `rollback` still
+reaches it in one write — it re-tags the recorded revision and moves the traffic
+— as a cold start, which it always was.
 
 **`keep_warm` is refused here.** Keeping a revision warm is
-`scaling.min_instance_count` on the template, which Terraform owns.
+`scaling.min_instance_count`, which Terraform owns. On the template it applies
+per revision; at service level it is divided over the revisions that have
+traffic. Either way an idle side gets none of it, and the switch now actively
+takes away the address that was keeping it up.
 
 Cloud Run **jobs** carry no traffic, so they ride along the same way Container
 App Jobs do: their definitions are written at the switch, never before it.
 
-:::caution[The one genuine trap on Cloud Run]
-A *service*-level minimum instance count does not apply to a tagged revision. If
-you rely on a service minimum to avoid cold starts, the staged side will not
-have it.
+:::caution[Nothing expires]
+Cloud Run keeps every revision it has ever been given. A service deployed twice a
+day accumulates them until it meets a quota, and since the switch stopped tagging
+the side it retires, an outside script cannot tell the rollback target from the
+rest. Use [`evolve-deploy prune`](../../reference/cli/), which reads the traffic block
+and the annotation before it removes anything.
 :::
 
 ## AWS ECS
