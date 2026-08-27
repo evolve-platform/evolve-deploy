@@ -393,6 +393,39 @@ func (d *Driver) getService(ctx context.Context, name string) (*runpb.Service, e
 // leak a failed attempt's environment into the next release, and comparing
 // against it would report "already up to date" for a version that never
 // shipped.
+// adoptRuntime copies what a release owns from the containers that are running
+// onto the containers the service declares, matched by name.
+//
+// The image and the environment are read from the revision because the service
+// template is current for neither: both are what a deploy writes and what
+// Terraform is told to ignore, so an apply leaves behind whatever the service
+// was created with. Every other field is the other way round — Terraform
+// authors it, and the revision holds only what happened to be true when it was
+// created.
+//
+// A declared container the revision does not have keeps what the service says,
+// which is what a sidecar added since the last release needs.
+func adoptRuntime(declared, running []*runpb.Container) {
+	byName := make(map[string]*runpb.Container, len(running))
+	for _, c := range running {
+		byName[c.GetName()] = c
+	}
+	for _, c := range declared {
+		got, ok := byName[c.GetName()]
+		if !ok {
+			continue
+		}
+		c.Image = got.GetImage()
+		// Cloned rather than shared: the caller diffs these against the copy it
+		// is about to write, and two messages pointing at one slice would report
+		// no change at all.
+		c.Env = make([]*runpb.EnvVar, 0, len(got.GetEnv()))
+		for _, e := range got.GetEnv() {
+			c.Env = append(c.Env, proto.Clone(e).(*runpb.EnvVar))
+		}
+	}
+}
+
 func (d *Driver) revisionContainers(
 	ctx context.Context,
 	service, revision string,
@@ -938,11 +971,14 @@ func (d *Driver) planServiceBlueGreen(
 		if err != nil {
 			return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 		}
-		// Only the containers come from the revision. Everything else on the
-		// template — scaling, service account, VPC access — is Terraform's and
-		// is carried through from the service, which is where it is current.
+		// Only the image and the environment come from the revision. The rest
+		// of the container — ports, probes, resources — is Terraform's, the
+		// same as scaling and VPC access one level up, and taking the whole
+		// container staged the running values back over a change an apply had
+		// just made. A probe left pointing at a port the container no longer
+		// listens on is how that was found.
 		current = proto.Clone(svc.GetTemplate()).(*runpb.RevisionTemplate)
-		current.Containers = containers
+		adoptRuntime(current.GetContainers(), containers)
 	}
 
 	name, err := target.PickContainer(
