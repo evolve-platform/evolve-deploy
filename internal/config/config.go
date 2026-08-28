@@ -625,9 +625,17 @@ func (f *File) validate() error {
 				if t.Cluster != "" {
 					add("%s: `cluster` only applies to ecs targets", where)
 				}
-				if t.Container != "" {
-					add("%s: `container` only applies to ecs targets", where)
-				}
+			}
+			// Every type whose driver reaches for it -- see PickContainer.
+			// Cloud Run is the one that cannot do without: its containers have
+			// no conventional name to fall back on, so a service with a sidecar
+			// is undeployable unless the config can say which container carries
+			// the image.
+			if t.Container != "" && !slicesContain([]TargetType{
+				TypeECS, TypeCloudRun, TypeCloudRunJob,
+				TypeContainerApp, TypeContainerJob,
+			}, t.Type) {
+				add("%s: `container` does not apply to %s targets", where, t.Type)
 			}
 			if t.Type != TypeLambda && t.Type != TypeFunctionApp && t.Code != nil {
 				add("%s: `code` only applies to lambda and function-app targets", where)

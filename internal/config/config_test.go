@@ -485,3 +485,36 @@ services:
 		t.Errorf("err = %v, want a refusal naming aws", err)
 	}
 }
+
+// Cloud Run containers have no conventional name, so PickContainer cannot guess
+// which one carries the image once a service runs a sidecar. Saying so in the
+// config is the only way through, and it used to be refused as ECS-only --
+// which left a Cloud Run service with a reverse proxy undeployable either way.
+func TestContainerAppliesBeyondECS(t *testing.T) {
+	const gcpHeader = `
+cloud:
+  provider: gcp
+  project: evolve-tst
+  region: europe-west4
+`
+	f, err := load(t, gcpHeader+`
+services:
+  graphql-gateway:
+    version: abc1234
+    targets:
+      - { type: cloud-run, name: graphql-gateway, container: graphql-gateway-1 }
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Services["graphql-gateway"].Targets[0].Container; got != "graphql-gateway-1" {
+		t.Errorf("Container = %q, want graphql-gateway-1", got)
+	}
+
+	// Still refused where no driver reads it, which is what catches a target
+	// quietly ignoring half its configuration.
+	_, err = load(t, awsHeader+"services:\n  ev:\n    version: a\n    targets:\n      - type: lambda\n        name: ev\n        container: main\n        code: { bucket: b, key: k }\n")
+	if err == nil || !strings.Contains(err.Error(), "`container` does not apply to lambda") {
+		t.Errorf("err = %v, want a refusal naming lambda", err)
+	}
+}
