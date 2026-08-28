@@ -109,6 +109,46 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 	}
 }
 
+// Terraform owns every field of the released container but the tag and the
+// environment, which is why the next revision is built on the service's own
+// template. A probe or a port an apply has just changed has to reach the next
+// release rather than be staged back out: a liveness probe left polling the
+// port the service no longer listens on killed every instance for failing it.
+func TestTheReleasedContainerKeepsWhatTerraformOwns(t *testing.T) {
+	current := template("r1", &runpb.Container{
+		Name:  "app",
+		Image: "repo/site:old",
+		Ports: []*runpb.ContainerPort{{Name: "http1", ContainerPort: 4000}},
+		LivenessProbe: &runpb.Probe{
+			PeriodSeconds: 60,
+			ProbeType: &runpb.Probe_HttpGet{
+				HttpGet: &runpb.HTTPGetAction{Path: "/api/healthcheck", Port: 4000},
+			},
+		},
+		Env: []*runpb.EnvVar{literal("STALE", "from-the-first-create")},
+	})
+
+	next, _, err := nextTemplate(current, "app", "2daef25", []target.EnvVar{
+		{Name: "REDIS_URL", Value: refs.Value{Kind: refs.Literal, Literal: "redis://live"}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	app := findContainer(next.GetContainers(), "app")
+	if port := app.GetPorts()[0].GetContainerPort(); port != 4000 {
+		t.Errorf("ContainerPort = %d, want the declared 4000", port)
+	}
+	probe := app.GetLivenessProbe()
+	if probe.GetPeriodSeconds() != 60 || probe.GetHttpGet().GetPort() != 4000 {
+		t.Errorf("liveness probe = %v, want the declared one", probe)
+	}
+	if got := envFingerprint(app.GetEnv(), nil); !reflect.DeepEqual(
+		got, map[string]string{"REDIS_URL": "=redis://live"}) {
+		t.Errorf("environment = %v, want the one the config declares", got)
+	}
+}
+
 func TestReferencesBecomeSecretKeyRefs(t *testing.T) {
 	got := renderEnv([]target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "info"}},

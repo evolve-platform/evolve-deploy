@@ -387,45 +387,10 @@ func (d *Driver) getService(ctx context.Context, name string) (*runpb.Service, e
 
 // revisionContainers reads one revision's own containers.
 //
-// This is the read that makes blue-green correct rather than nearly correct.
-// With two live revisions the service's template is whichever was created last
-// — after a failed deploy, the one that was abandoned. Building on that would
-// leak a failed attempt's environment into the next release, and comparing
-// against it would report "already up to date" for a version that never
-// shipped.
-// adoptRuntime copies what a release owns from the containers that are running
-// onto the containers the service declares, matched by name.
-//
-// The image and the environment are read from the revision because the service
-// template is current for neither: both are what a deploy writes and what
-// Terraform is told to ignore, so an apply leaves behind whatever the service
-// was created with. Every other field is the other way round — Terraform
-// authors it, and the revision holds only what happened to be true when it was
-// created.
-//
-// A declared container the revision does not have keeps what the service says,
-// which is what a sidecar added since the last release needs.
-func adoptRuntime(declared, running []*runpb.Container) {
-	byName := make(map[string]*runpb.Container, len(running))
-	for _, c := range running {
-		byName[c.GetName()] = c
-	}
-	for _, c := range declared {
-		got, ok := byName[c.GetName()]
-		if !ok {
-			continue
-		}
-		c.Image = got.GetImage()
-		// Cloned rather than shared: the caller diffs these against the copy it
-		// is about to write, and two messages pointing at one slice would report
-		// no change at all.
-		c.Env = make([]*runpb.EnvVar, 0, len(got.GetEnv()))
-		for _, e := range got.GetEnv() {
-			c.Env = append(c.Env, proto.Clone(e).(*runpb.EnvVar))
-		}
-	}
-}
-
+// This is what the environment diff is taken against. With two live revisions
+// the service's template is whichever was created last — after a failed deploy,
+// the one that was abandoned — so comparing against the template would report a
+// retry as already up to date for a version that never shipped.
 func (d *Driver) revisionContainers(
 	ctx context.Context,
 	service, revision string,
@@ -963,33 +928,43 @@ func (d *Driver) planServiceBlueGreen(
 		return nil, err
 	}
 
-	// Only fall back to the service's own template when no side is serving yet,
-	// which is a service that has never been deployed this way.
-	current := svc.GetTemplate()
+	// The revision is built on the service's own template, because Terraform
+	// owns every part of the container but the tag and the environment: a probe,
+	// a cpu bump, a sidecar's image or a sidecar's environment has to reach the
+	// next release. Building on the serving revision instead stages the running
+	// values back over an apply, so what Terraform declares is reverted rather
+	// than delayed and it never owns what it declares.
+	//
+	// The serving revision is read rather than built on, because with two live
+	// revisions the template is whichever was created last — after a failed
+	// deploy, the attempt that was abandoned. It is what the environment diff
+	// compares against, so a retry is not reported as already up to date.
+	base := svc.GetTemplate()
+	serving := base.GetContainers()
 	if sides.Active.Revision != "" {
 		containers, err := d.revisionContainers(ctx, t.Name, sides.Active.Revision)
 		if err != nil {
 			return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 		}
-		// Only the image and the environment come from the revision. The rest
-		// of the container — ports, probes, resources — is Terraform's, the
-		// same as scaling and VPC access one level up, and taking the whole
-		// container staged the running values back over a change an apply had
-		// just made. A probe left pointing at a port the container no longer
-		// listens on is how that was found.
-		current = proto.Clone(svc.GetTemplate()).(*runpb.RevisionTemplate)
-		adoptRuntime(current.GetContainers(), containers)
+		serving = containers
 	}
 
 	name, err := target.PickContainer(
-		containerNames(current.GetContainers()), t.Container, cloudRunContainer)
+		containerNames(base.GetContainers()), t.Container, cloudRunContainer)
 	if err != nil {
 		return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 	}
 
-	next, from, err := nextTemplate(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextTemplate(base, name, want.Version, want.Env, want.ManageEnv)
 	if err != nil {
 		return nil, err
+	}
+	// The tag the template carries is the last one written, which after a failed
+	// deploy names a release that never took traffic. What is live is the version
+	// on the serving revision — and a service that has never been deployed has
+	// neither, so the template's tag stands in.
+	if sides.Active.Version != "" {
+		from = sides.Active.Version
 	}
 	// The side goes in last, and after the diff is taken it is invisible — see
 	// envFingerprint. It alternates every release, so comparing it would report
@@ -998,7 +973,7 @@ func (d *Driver) planServiceBlueGreen(
 	managed := t.Strategy.SideEnvNames()
 	next = withSide(next, name, sides.Idle.Label, want.SideEnv[sides.Idle.Label], managed)
 
-	added, changed, removed := diffEnv(current.GetContainers(), next.GetContainers(), name, managed)
+	added, changed, removed := diffEnv(serving, next.GetContainers(), name, managed)
 
 	// Nothing changed here, but the side still needs a revision of its own: the
 	// staged side is only a stack if every service is on it, and a revision can
@@ -1025,16 +1000,15 @@ func (d *Driver) planServiceBlueGreen(
 // container's environment.
 //
 // It works on whatever environment it is given, which is what makes it correct
-// in image-only mode too: there the environment was copied from the serving
-// revision untouched, and this writes a few variables over it rather than
-// replacing the lot.
+// in image-only mode too: there the environment is the template's own, and this
+// writes a few variables over it rather than replacing the lot.
 //
 // `managed` is every variable any side names, and it is dropped before the
 // staged side's values go in. That is why it is passed rather than derived from
-// `sideEnv`: the containers came from the *other* side's revision, so a variable
-// this side does not set would arrive carrying the other side's value. Config
-// validation keeps the two sets equal, so in practice this removes exactly what
-// it puts back — differently.
+// `sideEnv`: the template carries whatever the last release wrote, which is the
+// *other* side, so a variable this side does not set would arrive carrying the
+// other side's value. Config validation keeps the two sets equal, so in practice
+// this removes exactly what it puts back — differently.
 func withSide(
 	tmpl *runpb.RevisionTemplate,
 	name, side string,
