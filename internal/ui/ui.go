@@ -133,6 +133,9 @@ func renderEnv(w io.Writer, ch *target.Change) {
 	for _, name := range ch.EnvRemoved {
 		fmt.Fprintf(w, "      - %s\n", name)
 	}
+	if len(ch.Command) > 0 {
+		fmt.Fprintf(w, "      ~ command: %s\n", strings.Join(ch.Command, " "))
+	}
 }
 
 // renderRollout says how this target is going out, and what it falls back to.

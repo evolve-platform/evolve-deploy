@@ -19,10 +19,12 @@ type jobPayload struct {
 
 // planJob is planService for a Cloud Run job.
 //
-// A job is the same image as the service beside it, started with different
-// arguments — four `evolve sync <job>` runs share one build. Those arguments
-// live in the task template and belong to Terraform, so only the tag and the
-// environment change here.
+// A job is the same image as the service beside it, started with a different
+// entry point — four `evolve sync <job>` runs share one build. That entry point
+// is Terraform's unless the config states one, in which case it travels with the
+// version: a command names a path inside the image, so an image whose layout
+// moved and a command that has not are a job that will not start, and the two
+// have to land in one write.
 func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Change, error) {
 	t := want.Target
 
@@ -37,7 +39,7 @@ func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, fmt.Errorf("cloud run job %s: %w", t.Name, err)
 	}
 
-	next, from, err := nextJob(job, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextJob(job, name, want.Version, want.Env, want.ManageEnv, t.Command)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +47,8 @@ func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Cha
 	// A job carries no traffic and so has no side of its own to write, which is
 	// also why PublicURL stays empty: there is no ingress to name.
 	added, changed, removed := diffEnv(current, jobContainers(next), name, nil)
-	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
+	command := diffCommand(current, jobContainers(next), name)
+	if len(added)+len(changed)+len(removed)+len(command) == 0 && from == want.Version {
 		return nil, nil
 	}
 
@@ -54,11 +57,13 @@ func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Cha
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
-		EnvAdded:    added,
-		EnvChanged:  changed,
-		EnvRemoved:  removed,
-		Payload:     &jobPayload{job: next, previous: job},
+		Reason: reason(from, want.Version,
+			len(added)+len(changed)+len(removed) > 0, len(command) > 0),
+		EnvAdded:   added,
+		EnvChanged: changed,
+		EnvRemoved: removed,
+		Command:    command,
+		Payload:    &jobPayload{job: next, previous: job},
 	}, nil
 }
 
@@ -146,10 +151,11 @@ func nextJob(
 	name, version string,
 	env []target.EnvVar,
 	manageEnv bool,
+	command []string,
 ) (next *runpb.Job, from string, err error) {
 	next = proto.Clone(current).(*runpb.Job)
 
-	from, err = retag(jobContainers(next), name, version, env, manageEnv)
+	from, err = retag(jobContainers(next), name, version, env, manageEnv, command)
 	if err != nil {
 		return nil, "", err
 	}

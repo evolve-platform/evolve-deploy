@@ -45,7 +45,7 @@ func TestTheUnnamedContainerIsFound(t *testing.T) {
 
 	next, from, err := nextTemplate(current, name, "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestRevisionNameIsCleared(t *testing.T) {
 	// makes Cloud Run reject the update.
 	current := template("purchase-00007-abc", &runpb.Container{Image: "repo/purchase:old"})
 
-	next, _, err := nextTemplate(current, "", "abc1234", nil, false)
+	next, _, err := nextTemplate(current, "", "abc1234", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 
 	next, _, err := nextTemplate(current, "app", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestTheReleasedContainerKeepsWhatTerraformOwns(t *testing.T) {
 
 	next, _, err := nextTemplate(current, "app", "2daef25", []target.EnvVar{
 		{Name: "REDIS_URL", Value: refs.Value{Kind: refs.Literal, Literal: "redis://live"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestADeclaredEnvironmentIsTheWholeEnvironment(t *testing.T) {
 	next, _, err := nextTemplate(current, "app", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
 		{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestAConfigDeclaringNoEnvironmentKeepsWhatIsThere(t *testing.T) {
 		},
 	})
 
-	next, _, err := nextTemplate(current, "app", "abc1234", nil, false)
+	next, _, err := nextTemplate(current, "app", "abc1234", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestASidecarKeepsItsEnvironmentWhenTheConfigDeclaresOne(t *testing.T) {
 
 	next, _, err := nextTemplate(current, "app", "abc1234", []target.EnvVar{
 		{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

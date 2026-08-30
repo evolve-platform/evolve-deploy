@@ -955,7 +955,8 @@ func (d *Driver) planServiceBlueGreen(
 		return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 	}
 
-	next, from, err := nextTemplate(base, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextTemplate(
+		base, name, want.Version, want.Env, want.ManageEnv, t.Command)
 	if err != nil {
 		return nil, err
 	}
@@ -974,25 +975,28 @@ func (d *Driver) planServiceBlueGreen(
 	next = withSide(next, name, sides.Idle.Label, want.SideEnv[sides.Idle.Label], managed)
 
 	added, changed, removed := diffEnv(serving, next.GetContainers(), name, managed)
+	command := diffCommand(serving, next.GetContainers(), name)
 
 	// Nothing changed here, but the side still needs a revision of its own: the
 	// staged side is only a stack if every service is on it, and a revision can
 	// hold one tag at a time so the serving one cannot lend it.
-	carry := len(added)+len(changed)+len(removed) == 0 && from == want.Version
+	carry := len(added)+len(changed)+len(removed)+len(command) == 0 && from == want.Version
 
 	return &target.Change{
 		Service:     want.Service,
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
-		EnvAdded:    added,
-		EnvChanged:  changed,
-		EnvRemoved:  removed,
-		Sides:       sides,
-		Carry:       carry,
-		PublicURL:   svc.GetUri(),
-		Payload:     &bgPayload{template: next, annotations: svc.GetAnnotations()},
+		Reason: reason(from, want.Version,
+			len(added)+len(changed)+len(removed) > 0, len(command) > 0),
+		EnvAdded:   added,
+		EnvChanged: changed,
+		EnvRemoved: removed,
+		Command:    command,
+		Sides:      sides,
+		Carry:      carry,
+		PublicURL:  svc.GetUri(),
+		Payload:    &bgPayload{template: next, annotations: svc.GetAnnotations()},
 	}, nil
 }
 

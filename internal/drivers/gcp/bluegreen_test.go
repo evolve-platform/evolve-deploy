@@ -429,7 +429,7 @@ func TestVersionSurvivesARevision(t *testing.T) {
 		}},
 	}
 
-	next, from, err := nextTemplate(current, "app", "27ec167", nil, false)
+	next, from, err := nextTemplate(current, "app", "27ec167", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

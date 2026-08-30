@@ -80,6 +80,15 @@ type Change struct {
 	EnvChanged []string
 	EnvRemoved []string
 
+	// Command is the entry point this change writes, set only where it differs
+	// from the one the target is running.
+	//
+	// It has to be part of what makes a change a change: a target whose command
+	// moved while its version did not would otherwise plan as nothing to do,
+	// and the release that was supposed to correct it would report success
+	// having written nothing.
+	Command []string
+
 	// Sides is set for a blue-green target: which label this change is going to
 	// and which one it is coming from. Nil for a direct change, and nil for a
 	// target that rides along without carrying traffic.

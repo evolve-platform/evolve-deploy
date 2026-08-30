@@ -518,3 +518,69 @@ services:
 		t.Errorf("err = %v, want a refusal naming lambda", err)
 	}
 }
+
+// A command is what makes one job different from the next when several share an
+// image, and it names a path inside that image -- so it has to be able to travel
+// with the version rather than sitting in Terraform, where a layout change and
+// the command that follows it land in two separate writes.
+func TestCommandIsATargetFieldOnTheTypesThatWriteIt(t *testing.T) {
+	const gcpHeader = `
+cloud:
+  provider: gcp
+  project: evolve-tst
+  region: europe-west4
+`
+	f, err := load(t, gcpHeader+`
+services:
+  discover:
+    version: abc1234
+    targets:
+      - type: cloud-run
+        name: discover
+      - type: cloud-run-job
+        name: discover-products
+        command: ["node", "src/cli.ts", "sync", "products"]
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := f.Services["discover"].Targets
+	if got := targets[0].Command; got != nil {
+		t.Errorf("service command = %v, want none declared", got)
+	}
+	if got := strings.Join(targets[1].Command, " "); got != "node src/cli.ts sync products" {
+		t.Errorf("job command = %q", got)
+	}
+
+	// Refused where no driver writes it: a command that reads as if it took
+	// effect and did not is worse than one the file cannot express.
+	_, err = load(t, `
+cloud:
+  provider: azure
+  subscription: 00000000-0000-0000-0000-000000000000
+  resource_group: evolve-tst
+services:
+  site:
+    version: abc1234
+    targets:
+      - type: container-app
+        name: site
+        command: ["node", "server.js"]
+`)
+	if err == nil || !strings.Contains(err.Error(), "`command` is not supported on container-app targets yet") {
+		t.Errorf("err = %v, want a refusal naming container-app", err)
+	}
+
+	// An empty list has no meaning worth guessing at: clearing an entry point
+	// leaves the image's CMD, and omitting the key already says "leave it".
+	_, err = load(t, gcpHeader+`
+services:
+  discover:
+    version: abc1234
+    targets:
+      - { type: cloud-run-job, name: discover-products, command: [] }
+`)
+	if err == nil || !strings.Contains(err.Error(), "`command` is empty") {
+		t.Errorf("err = %v, want a refusal naming the empty command", err)
+	}
+}
