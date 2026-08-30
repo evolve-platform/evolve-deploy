@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"cloud.google.com/go/run/apiv2/runpb"
@@ -53,13 +54,15 @@ func (d *Driver) planService(ctx context.Context, want *target.Desired) (*target
 		return nil, fmt.Errorf("cloud run service %s: %w", t.Name, err)
 	}
 
-	next, from, err := nextTemplate(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextTemplate(
+		current, name, want.Version, want.Env, want.ManageEnv, t.Command)
 	if err != nil {
 		return nil, err
 	}
 
 	added, changed, removed := diffEnv(current.GetContainers(), next.GetContainers(), name, nil)
-	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
+	command := diffCommand(current.GetContainers(), next.GetContainers(), name)
+	if len(added)+len(changed)+len(removed)+len(command) == 0 && from == want.Version {
 		return nil, nil
 	}
 
@@ -68,12 +71,14 @@ func (d *Driver) planService(ctx context.Context, want *target.Desired) (*target
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
-		EnvAdded:    added,
-		EnvChanged:  changed,
-		EnvRemoved:  removed,
-		PublicURL:   svc.GetUri(),
-		Payload:     &payload{template: next, previous: current, etag: svc.GetEtag()},
+		Reason: reason(from, want.Version,
+			len(added)+len(changed)+len(removed) > 0, len(command) > 0),
+		EnvAdded:   added,
+		EnvChanged: changed,
+		EnvRemoved: removed,
+		Command:    command,
+		PublicURL:  svc.GetUri(),
+		Payload:    &payload{template: next, previous: current, etag: svc.GetEtag()},
 	}, nil
 }
 
@@ -146,13 +151,15 @@ func (d *Driver) update(ctx context.Context, name string, tmpl *runpb.RevisionTe
 }
 
 // nextTemplate copies the template and replaces the image tag of one container,
-// and its environment when the config declares one. Sidecars are copied through:
-// their images and settings are Terraform's.
+// its environment when the config declares one, and its entry point when the
+// config declares that. Sidecars are copied through: their images and settings
+// are Terraform's.
 func nextTemplate(
 	current *runpb.RevisionTemplate,
 	name, version string,
 	env []target.EnvVar,
 	manageEnv bool,
+	command []string,
 ) (next *runpb.RevisionTemplate, from string, err error) {
 	next = proto.Clone(current).(*runpb.RevisionTemplate)
 
@@ -160,7 +167,7 @@ func nextTemplate(
 	// would make Cloud Run reject the update.
 	next.Revision = ""
 
-	from, err = retag(next.GetContainers(), name, version, env, manageEnv)
+	from, err = retag(next.GetContainers(), name, version, env, manageEnv, command)
 	if err != nil {
 		return nil, "", err
 	}
@@ -191,7 +198,8 @@ func nextTemplate(
 const versionAnnotation = "evolve-deploy/version"
 
 // retag rewrites one container of an already-copied list in place: the image
-// tag, and the environment when the config declares one.
+// tag, the environment when the config declares one, and the entry point when
+// the config declares that.
 //
 // It works on containers rather than on a template because a service and a job
 // hold theirs in different messages — a RevisionTemplate against a TaskTemplate
@@ -203,6 +211,7 @@ func retag(
 	name, version string,
 	env []target.EnvVar,
 	manageEnv bool,
+	command []string,
 ) (from string, err error) {
 	var found bool
 	for _, c := range containers {
@@ -216,6 +225,14 @@ func retag(
 		from = image.Tag(c.GetImage())
 		c.Image = img
 		c.Env = containerEnv(c.GetEnv(), renderEnv(env), manageEnv)
+		if len(command) > 0 {
+			// Args go with it. The declaration is the whole command line, and
+			// Cloud Run appends args to command, so arguments left from what
+			// Terraform declared would turn `sync products` into
+			// `sync products sync categories`.
+			c.Command = command
+			c.Args = nil
+		}
 		found = true
 	}
 	if !found {
@@ -335,6 +352,19 @@ func diffEnv(
 	return added, changed, removed
 }
 
+// diffCommand reports the entry point the next container carries, when it is
+// not the one the current container has. Nil means unchanged, which is also
+// what a config that declares no command produces: nothing is written, so
+// nothing can differ.
+func diffCommand(current, next []*runpb.Container, name string) []string {
+	have := findContainer(current, name).GetCommand()
+	want := findContainer(next, name).GetCommand()
+	if slices.Equal(have, want) {
+		return nil
+	}
+	return want
+}
+
 func containerNames(containers []*runpb.Container) []string {
 	out := make([]string, 0, len(containers))
 	for _, c := range containers {
@@ -352,11 +382,22 @@ func findContainer(containers []*runpb.Container, name string) *runpb.Container 
 	return nil
 }
 
-func reason(from, to string) string {
+// reason says why a target is being touched, and at an unchanged version it has
+// to name which of the two things a deploy owns has moved. Reading "environment
+// changed" on a release that rewrote an entry point sends the reader looking for
+// a variable that did not change.
+func reason(from, to string, envChanged, commandChanged bool) string {
 	if from != to {
 		return fmt.Sprintf("version %s -> %s", target.VersionOrUnknown(from), to)
 	}
-	return "environment changed"
+	switch {
+	case envChanged && commandChanged:
+		return "environment and command changed"
+	case commandChanged:
+		return "command changed"
+	default:
+		return "environment changed"
+	}
 }
 
 func orNone(s string) string {

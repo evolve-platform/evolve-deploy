@@ -364,6 +364,28 @@ type Target struct {
 	// proxy or an OpenTelemetry collector are never touched.
 	Container string `yaml:"container"`
 
+	// Command is the container's entry point, and is how targets sharing one
+	// image say which of them they are: the `evolve sync <job>` runs beside a
+	// subgraph are one build started several ways.
+	//
+	// It belongs to a target and never to a service, because a service block
+	// whose targets all took the same command would be describing one job
+	// several times over.
+	//
+	// The whole command line goes here rather than a command and its arguments.
+	// The declaration is the entry point the way `env` is the environment, so
+	// arguments the container carried separately are dropped with it — left in
+	// place they would be appended to the new command and the container would
+	// start on a line nobody wrote.
+	//
+	// Absent means the entry point already on the target is carried through,
+	// which is what a config written before this existed goes on doing with
+	// Terraform still owning it. That is also the trap: a target whose command
+	// Terraform has stopped declaring and whose config does not declare one
+	// falls back to the image's own CMD, and for an image shared by a service
+	// and its jobs that CMD is the server.
+	Command []string `yaml:"command"`
+
 	// TestURL is the address the test listener rule answers on, ECS only.
 	//
 	// Everywhere else the staged side has an address the tool can work out — a
@@ -639,6 +661,23 @@ func (f *File) validate() error {
 			}
 			if t.Type != TypeLambda && t.Type != TypeFunctionApp && t.Code != nil {
 				add("%s: `code` only applies to lambda and function-app targets", where)
+			}
+			// Only the types whose driver writes it. The others carry the entry
+			// point through untouched, and a command set on one of those would
+			// be configuration that reads as if it took effect. Container Apps
+			// and ECS can both express one, so this is a driver that has not
+			// been written rather than a platform that cannot.
+			if len(t.Command) > 0 && !slicesContain([]TargetType{
+				TypeCloudRun, TypeCloudRunJob,
+			}, t.Type) {
+				add("%s: `command` is not supported on %s targets yet", where, t.Type)
+			}
+			// An empty list is the one shape with no useful meaning: clearing an
+			// entry point leaves the image's CMD, which is never what someone
+			// writing this out wants, and omitting the key already says "leave
+			// it alone".
+			if t.Command != nil && len(t.Command) == 0 {
+				add("%s: `command` is empty; omit it to keep the entry point the target has", where)
 			}
 
 			// The tool writes this one itself on a blue-green target, and the

@@ -1,6 +1,7 @@
 package gcp
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func TestAJobKeepsEverythingTerraformSetOnIt(t *testing.T) {
 
 	next, from, err := nextJob(current, "", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func TestAJobSidecarIsLeftAlone(t *testing.T) {
 
 	next, _, err := nextJob(current, "app", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +131,7 @@ func TestAJobConfigDeclaringNoEnvironmentKeepsWhatIsThere(t *testing.T) {
 		},
 	})
 
-	next, _, err := nextJob(current, "", "abc1234", nil, false)
+	next, _, err := nextJob(current, "", "abc1234", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +152,7 @@ func TestAJobReferenceBecomesASecretKeyRef(t *testing.T) {
 
 	next, _, err := nextJob(current, "", "abc1234", []target.EnvVar{
 		{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "discover-ctp"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,5 +186,81 @@ func TestAJobWithSeveralContainersAndNoNameIsRefused(t *testing.T) {
 		containerNames(jobContainers(current)), "", cloudRunContainer)
 	if err == nil {
 		t.Fatal("want a refusal naming what is there")
+	}
+}
+
+// The entry point is what makes one job different from the next, and it names a
+// path inside the image. A layout change on one side and the command on the
+// other is a job that will not start, so a declared command travels with the
+// version instead of staying behind in Terraform.
+func TestADeclaredCommandReplacesTheEntryPointAndTheArgumentsWithIt(t *testing.T) {
+	current := job("v1", &runpb.Container{
+		Image:   "europe-west4-docker.pkg.dev/mgmt/evolve/discover:old",
+		Command: []string{"node", "cli.mjs"},
+		Args:    []string{"sync", "products"},
+	})
+
+	next, _, err := nextJob(current, "", "abc1234", nil, false,
+		[]string{"node", "src/cli.ts", "sync", "products"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := jobContainers(next)[0]
+	if got := strings.Join(c.GetCommand(), " "); got != "node src/cli.ts sync products" {
+		t.Errorf("command = %q", got)
+	}
+	// Cloud Run appends args to command, so arguments left from what Terraform
+	// declared would have turned this into `sync products sync products`.
+	if got := c.GetArgs(); len(got) != 0 {
+		t.Errorf("args = %v, want them dropped with the command they belonged to", got)
+	}
+}
+
+// Absent means absent: a config written before this existed goes on deploying
+// the image and nothing else, with Terraform still owning the entry point.
+func TestNoDeclaredCommandLeavesTheEntryPointAlone(t *testing.T) {
+	current := job("v1", &runpb.Container{
+		Image:   "europe-west4-docker.pkg.dev/mgmt/evolve/discover:old",
+		Command: []string{"node", "cli.mjs", "sync", "products"},
+	})
+
+	next, _, err := nextJob(current, "", "abc1234", nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := jobContainers(next)[0]
+	if got := strings.Join(c.GetCommand(), " "); got != "node cli.mjs sync products" {
+		t.Errorf("command = %q, want the one Terraform set", got)
+	}
+	if got := diffCommand(jobContainers(current), jobContainers(next), ""); got != nil {
+		t.Errorf("diffCommand = %v, want nothing to report", got)
+	}
+}
+
+// A command that moved while the version did not is still a change. Reporting
+// nothing there would have the release that was meant to correct it succeed
+// having written nothing.
+func TestACommandOnlyChangeIsReportedAndNamed(t *testing.T) {
+	current := jobContainers(job("v1", &runpb.Container{
+		Image:   "europe-west4-docker.pkg.dev/mgmt/evolve/discover:abc1234",
+		Command: []string{"node", "cli.mjs", "sync", "products"},
+	}))
+	next, _, err := nextJob(job("v1", current...), "", "abc1234", nil, false,
+		[]string{"node", "src/cli.ts", "sync", "products"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	command := diffCommand(current, jobContainers(next), "")
+	if got := strings.Join(command, " "); got != "node src/cli.ts sync products" {
+		t.Errorf("diffCommand = %q", got)
+	}
+	if got := reason("abc1234", "abc1234", false, len(command) > 0); got != "command changed" {
+		t.Errorf("reason = %q", got)
+	}
+	if got := reason("abc1234", "abc1234", true, true); got != "environment and command changed" {
+		t.Errorf("reason = %q", got)
 	}
 }

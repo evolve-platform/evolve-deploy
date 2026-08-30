@@ -108,6 +108,36 @@ a field that means nothing to it.
 | `container` | `ecs` | which container carries the application image |
 | `code` | `lambda`, `function-app` | where the deployment package lives |
 
+### The entry point
+
+`command` replaces the container's entry point. It is how several targets that
+share one image say which of them they are — the sync jobs beside a subgraph are
+one build started several ways:
+
+```yaml
+targets:
+  - { type: cloud-run,     name: discover }
+  - { type: cloud-run-job, name: discover-products,
+      command: ["node", "src/cli.ts", "sync", "products"] }
+```
+
+It sits on the target and never on the service, because a service whose targets
+all took the same command would be describing one job several times over.
+
+Write the whole command line. The declaration is the entry point the way `env`
+is the environment, so any arguments the container carried separately are
+dropped with it — Cloud Run appends args to command, and a leftover pair would
+start the container on a line nobody wrote.
+
+Leave it out and the entry point already on the target is carried through, which
+is what happens where Terraform owns it. Worth knowing which of the two you are
+relying on: a target that neither declares here nor gets one from Terraform runs
+the image's own `CMD`, and for an image shared by a service and its jobs that is
+the server.
+
+Only `cloud-run` and `cloud-run-job` write it today. On the other types it is
+refused rather than accepted and ignored.
+
 ### Picking the container
 
 Most tasks have one container and there is nothing to decide. When a task has
