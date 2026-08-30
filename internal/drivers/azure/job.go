@@ -48,14 +48,16 @@ func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	next, from, err := nextContainers(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextContainers(
+		current, name, want.Version, want.Env, want.ManageEnv, t.Command)
 	if err != nil {
 		return nil, err
 	}
 
 	// A job carries no traffic and so has no side of its own to write.
 	added, changed, removed := diffContainers(current, next, name, nil)
-	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
+	command := diffCommand(current, next, name)
+	if len(added)+len(changed)+len(removed)+len(command) == 0 && from == want.Version {
 		return nil, nil
 	}
 
@@ -64,11 +66,13 @@ func (d *Driver) planJob(ctx context.Context, want *target.Desired) (*target.Cha
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
-		EnvAdded:    added,
-		EnvChanged:  changed,
-		EnvRemoved:  removed,
-		Payload:     &jobPayload{containers: next, previous: current},
+		Reason: reason(from, want.Version,
+			len(added)+len(changed)+len(removed) > 0, len(command) > 0),
+		EnvAdded:   added,
+		EnvChanged: changed,
+		EnvRemoved: removed,
+		Command:    command,
+		Payload:    &jobPayload{containers: next, previous: current},
 	}, nil
 }
 

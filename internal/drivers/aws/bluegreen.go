@@ -677,7 +677,8 @@ func (d *Driver) planECSBlueGreen(
 			return nil, err
 		}
 		ch.Payload = &ecsPayload{
-			register: renderTaskDef(base, t.Name, name, img, want.Env, want.ManageEnv),
+			register: renderTaskDef(
+				base, t.Name, name, img, want.Env, want.ManageEnv, t.Command),
 			previous: sides.Active.Revision,
 		}
 	}

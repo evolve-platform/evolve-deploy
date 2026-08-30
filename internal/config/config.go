@@ -378,6 +378,13 @@ type Target struct {
 	// place they would be appended to the new command and the container would
 	// start on a line nobody wrote.
 	//
+	// Which field that lands in is the driver's problem, and the three
+	// platforms do not agree on the names. Cloud Run and Container Apps
+	// follow Kubernetes: `command` is the entry point and `args` is what
+	// follows it. ECS follows Docker: `entryPoint` is the entry point and
+	// `command` is what follows. Writing this into a field called `command`
+	// on ECS would leave the real entry point in place and append to it.
+	//
 	// Absent means the entry point already on the target is carried through,
 	// which is what a config written before this existed goes on doing with
 	// Terraform still owning it. That is also the trap: a target whose command
@@ -662,15 +669,16 @@ func (f *File) validate() error {
 			if t.Type != TypeLambda && t.Type != TypeFunctionApp && t.Code != nil {
 				add("%s: `code` only applies to lambda and function-app targets", where)
 			}
-			// Only the types whose driver writes it. The others carry the entry
-			// point through untouched, and a command set on one of those would
-			// be configuration that reads as if it took effect. Container Apps
-			// and ECS can both express one, so this is a driver that has not
-			// been written rather than a platform that cannot.
+			// Only the types that run a container. A lambda and a function app are
+			// handed a package and started by a host that owns the entry point, so
+			// a command there would be configuration that reads as if it took
+			// effect.
 			if len(t.Command) > 0 && !slicesContain([]TargetType{
 				TypeCloudRun, TypeCloudRunJob,
+				TypeContainerApp, TypeContainerJob,
+				TypeECS,
 			}, t.Type) {
-				add("%s: `command` is not supported on %s targets yet", where, t.Type)
+				add("%s: `command` does not apply to %s targets", where, t.Type)
 			}
 			// An empty list is the one shape with no useful meaning: clearing an
 			// entry point leaves the image's CMD, which is never what someone

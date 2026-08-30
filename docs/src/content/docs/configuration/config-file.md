@@ -135,8 +135,18 @@ relying on: a target that neither declares here nor gets one from Terraform runs
 the image's own `CMD`, and for an image shared by a service and its jobs that is
 the server.
 
-Only `cloud-run` and `cloud-run-job` write it today. On the other types it is
-refused rather than accepted and ignored.
+Every target type that runs a container takes one: `cloud-run`,
+`cloud-run-job`, `container-app`, `container-app-job` and `ecs`. It is refused
+on `lambda` and `function-app`, where the host is handed a package and owns the
+entry point itself.
+
+Which field it lands in is the driver's problem, and the platforms do not agree
+on the names. Cloud Run and Container Apps follow Kubernetes — `command` is the
+entry point, `args` is what follows it. ECS follows Docker — `entryPoint` is the
+entry point, `command` is what follows. You write the whole line either way; on
+ECS it is written to `entryPoint` and `command` is cleared, because writing it
+into the field that happens to share the name would leave the real entry point
+in place and append to it.
 
 ### Picking the container
 

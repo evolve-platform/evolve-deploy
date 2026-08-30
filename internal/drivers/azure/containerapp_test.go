@@ -41,7 +41,7 @@ func TestSidecarsAreLeftAlone(t *testing.T) {
 
 	next, from, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestDiffContainersIgnoresSidecarsAndRotations(t *testing.T) {
 
 func TestNextContainersRefusesAnUntaggedImage(t *testing.T) {
 	_, _, err := nextContainers(
-		[]*armappcontainers.Container{container("main", "")}, "main", "abc", nil, false)
+		[]*armappcontainers.Container{container("main", "")}, "main", "abc", nil, false, nil)
 	if err == nil {
 		t.Fatal("an image with no repository was accepted")
 	}
@@ -167,7 +167,7 @@ func TestAnAbsentEnvConfigLeavesTheEnvironmentAlone(t *testing.T) {
 			secretRef("CTP_CLIENT_SECRET", "ctp-client-secret")),
 	}
 
-	next, _, err := nextContainers(current, "main", "abc1234", nil, false)
+	next, _, err := nextContainers(current, "main", "abc1234", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +387,7 @@ func TestADeclaredEnvironmentIsTheWholeEnvironment(t *testing.T) {
 	next, _, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
 		{Name: "LOG_LEVEL", Value: refs.Value{Kind: refs.Literal, Literal: "debug"}},
 		{Name: "FEATURE_QUOTES", Value: refs.Value{Kind: refs.Literal, Literal: "on"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestAVariableThatChangesKindLeavesNothingBehind(t *testing.T) {
 
 	next, _, err := nextContainers(current, "main", "abc1234", []target.EnvVar{
 		{Name: "CTP_CLIENT_SECRET", Value: refs.Value{Kind: refs.Secret, Name: "ctp-client-secret"}},
-	}, true)
+	}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestTheConfigCannotRemoveAVariable(t *testing.T) {
 		container("main", "reg/purchase:old", literal("LOG_LEVEL", "info")),
 	}
 
-	next, _, err := nextContainers(current, "main", "abc1234", nil, false)
+	next, _, err := nextContainers(current, "main", "abc1234", nil, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,7 @@ func TestASidecarKeepsItsOwnEnvironment(t *testing.T) {
 		{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
 	}
 
-	next, _, err := nextContainers(current, "main", "new", declared, true)
+	next, _, err := nextContainers(current, "main", "new", declared, true, nil)
 	if err != nil {
 		t.Fatalf("nextContainers: %v", err)
 	}
@@ -549,5 +549,73 @@ func TestASidecarKeepsItsOwnEnvironment(t *testing.T) {
 	main := findContainer(next, "main")
 	if main == nil || len(main.Env) != 1 || derefString(main.Env[0].Name) != "APP_CONFIG_ENDPOINT" {
 		t.Errorf("released container env = %+v, want only APP_CONFIG_ENDPOINT", main)
+	}
+}
+
+// Container Apps follows Kubernetes, where args are appended to command. The
+// config's `command` is the whole line, so args left from what Terraform
+// declared would extend a command line the config meant to replace.
+func TestADeclaredCommandReplacesTheEntryPointAndTheArgsWithIt(t *testing.T) {
+	current := []*armappcontainers.Container{{
+		Name:    to.Ptr("main"),
+		Image:   to.Ptr("evolve.azurecr.io/discover:old"),
+		Command: to.SliceOfPtrs("node", "cli.mjs"),
+		Args:    to.SliceOfPtrs("sync", "products"),
+	}}
+
+	next, from, err := nextContainers(current, "main", "abc1234", nil, false,
+		[]string{"node", "src/cli.ts", "sync", "products"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if from != "old" {
+		t.Errorf("from = %q", from)
+	}
+
+	c := findContainer(next, "main")
+	if got := strings.Join(containerCommand(c), " "); got != "node src/cli.ts sync products" {
+		t.Errorf("command = %q", got)
+	}
+	if len(c.Args) != 0 {
+		t.Errorf("args = %v, want them dropped with the command they belonged to", c.Args)
+	}
+	if got := strings.Join(diffCommand(current, next, "main"), " "); got != "node src/cli.ts sync products" {
+		t.Errorf("diffCommand = %q", got)
+	}
+}
+
+// Absent means absent: a config written before this existed goes on deploying
+// the image and nothing else, with Terraform still owning the entry point.
+func TestNoDeclaredCommandLeavesTheEntryPointAlone(t *testing.T) {
+	current := []*armappcontainers.Container{{
+		Name:    to.Ptr("main"),
+		Image:   to.Ptr("evolve.azurecr.io/discover:old"),
+		Command: to.SliceOfPtrs("node", "cli.mjs", "sync", "products"),
+	}}
+
+	next, _, err := nextContainers(current, "main", "abc1234", nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := findContainer(next, "main")
+	if got := strings.Join(containerCommand(c), " "); got != "node cli.mjs sync products" {
+		t.Errorf("command = %q, want the one Terraform set", got)
+	}
+	if got := diffCommand(current, next, "main"); got != nil {
+		t.Errorf("diffCommand = %v, want nothing to report", got)
+	}
+}
+
+// A command that moved while the version did not is still a change, and the
+// plan has to say which of the two things a deploy owns moved.
+func TestACommandOnlyChangeIsNamedInTheReason(t *testing.T) {
+	if got := reason("abc1234", "abc1234", false, true); got != "command changed" {
+		t.Errorf("reason = %q", got)
+	}
+	if got := reason("abc1234", "abc1234", true, true); got != "environment and command changed" {
+		t.Errorf("reason = %q", got)
+	}
+	if got := reason("abc1234", "abc1234", true, false); got != "environment changed" {
+		t.Errorf("reason = %q", got)
 	}
 }
