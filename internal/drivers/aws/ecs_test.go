@@ -240,7 +240,7 @@ func TestRenderTaskDefLeavesSidecarsAlone(t *testing.T) {
 		"1234.dkr.ecr.eu-west-1.amazonaws.com/purchase:abc1234",
 		[]target.EnvVar{
 			{Name: "APP_CONFIG_ENDPOINT", Value: refs.Value{Kind: refs.Literal, Literal: "https://store"}},
-		}, true)
+		}, true, nil)
 
 	app := findContainer(out.ContainerDefinitions, "app")
 	want := map[string]string{"APP_CONFIG_ENDPOINT": "https://store"}
@@ -277,4 +277,79 @@ func secretMap(secs []ecstypes.Secret) map[string]string {
 		out[awssdk.ToString(s.Name)] = awssdk.ToString(s.ValueFrom)
 	}
 	return out
+}
+
+// ECS keeps Docker's names, where `entryPoint` is what runs and `command` is
+// what is passed to it — the reverse of the Kubernetes naming Cloud Run and
+// Container Apps use. The config's `command` is the whole line, so it has to
+// land in EntryPoint; writing it to Command would leave the real entry point in
+// place and append to it.
+func TestADeclaredCommandBecomesTheEntryPointAndClearsTheCommand(t *testing.T) {
+	base := &ecstypes.TaskDefinition{
+		Family: awssdk.String("evolve-tst-discover-base"),
+		ContainerDefinitions: []ecstypes.ContainerDefinition{{
+			Name:       awssdk.String("app"),
+			Image:      awssdk.String("1234.dkr.ecr.eu-west-1.amazonaws.com/discover:old"),
+			EntryPoint: []string{"node", "cli.mjs"},
+			Command:    []string{"sync", "products"},
+		}},
+	}
+
+	out := renderTaskDef(base, "evolve-tst-discover-products", "app",
+		"1234.dkr.ecr.eu-west-1.amazonaws.com/discover:abc1234", nil, false,
+		[]string{"node", "src/cli.ts", "sync", "products"})
+
+	app := findContainer(out.ContainerDefinitions, "app")
+	if got := app.EntryPoint; !reflect.DeepEqual(got, []string{"node", "src/cli.ts", "sync", "products"}) {
+		t.Errorf("entry point = %v", got)
+	}
+	if got := app.Command; len(got) != 0 {
+		t.Errorf("command = %v, want it dropped with the entry point it belonged to", got)
+	}
+}
+
+// Absent means absent: the entry point stays Terraform's, and the fingerprint
+// reports no difference to plan on.
+func TestNoDeclaredCommandLeavesTheEntryPointToTerraform(t *testing.T) {
+	base := &ecstypes.TaskDefinition{
+		Family: awssdk.String("evolve-tst-discover-base"),
+		ContainerDefinitions: []ecstypes.ContainerDefinition{{
+			Name:       awssdk.String("app"),
+			Image:      awssdk.String("1234.dkr.ecr.eu-west-1.amazonaws.com/discover:old"),
+			EntryPoint: []string{"node", "cli.mjs", "sync", "products"},
+		}},
+	}
+
+	out := renderTaskDef(base, "evolve-tst-discover-products", "app",
+		"1234.dkr.ecr.eu-west-1.amazonaws.com/discover:abc1234", nil, false, nil)
+
+	app := findContainer(out.ContainerDefinitions, "app")
+	if got := app.EntryPoint; !reflect.DeepEqual(got, []string{"node", "cli.mjs", "sync", "products"}) {
+		t.Errorf("entry point = %v, want the one Terraform set", got)
+	}
+
+	have := fingerprintContainers(base.ContainerDefinitions)
+	want := fingerprintContainers(out.ContainerDefinitions)
+	if !reflect.DeepEqual(have[0].Entry, want[0].Entry) {
+		t.Errorf("entry fingerprint moved: %v -> %v", have[0].Entry, want[0].Entry)
+	}
+}
+
+// The entry point is out of Rest so that a command the deploy config owns is not
+// reported as the base task definition having moved underneath it.
+func TestAnEntryPointChangeIsNotReportedAsTheBaseChanging(t *testing.T) {
+	fp := func(entry []string) containerFP {
+		return fingerprintContainers([]ecstypes.ContainerDefinition{{
+			Name:       awssdk.String("app"),
+			Image:      awssdk.String("repo:abc1234"),
+			EntryPoint: entry,
+		}})[0]
+	}
+	a, b := fp([]string{"node", "cli.mjs"}), fp([]string{"node", "src/cli.ts"})
+	if a.Rest != b.Rest {
+		t.Errorf("Rest differs on an entry point change: %q vs %q", a.Rest, b.Rest)
+	}
+	if reflect.DeepEqual(a.Entry, b.Entry) {
+		t.Error("Entry did not record the change")
+	}
 }

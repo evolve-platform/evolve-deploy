@@ -552,9 +552,8 @@ services:
 		t.Errorf("job command = %q", got)
 	}
 
-	// Refused where no driver writes it: a command that reads as if it took
-	// effect and did not is worse than one the file cannot express.
-	_, err = load(t, `
+	// Every type that runs a container takes one, on all three clouds.
+	f, err = load(t, `
 cloud:
   provider: azure
   subscription: 00000000-0000-0000-0000-000000000000
@@ -563,12 +562,21 @@ services:
   site:
     version: abc1234
     targets:
-      - type: container-app
-        name: site
-        command: ["node", "server.js"]
+      - { type: container-app,     name: site,      command: ["node", "server.js"] }
+      - { type: container-app-job, name: site-sync, command: ["node", "sync.js"] }
 `)
-	if err == nil || !strings.Contains(err.Error(), "`command` is not supported on container-app targets yet") {
-		t.Errorf("err = %v, want a refusal naming container-app", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.Services["site"].Targets[1].Command, " "); got != "node sync.js" {
+		t.Errorf("container-app-job command = %q", got)
+	}
+
+	// Refused where the host owns the entry point: a lambda and a function app
+	// are handed a package, not started with a command line.
+	_, err = load(t, awsHeader+"services:\n  ev:\n    version: a\n    targets:\n      - type: lambda\n        name: ev\n        command: [\"node\", \"index.js\"]\n        code: { bucket: b, key: k }\n")
+	if err == nil || !strings.Contains(err.Error(), "`command` does not apply to lambda") {
+		t.Errorf("err = %v, want a refusal naming lambda", err)
 	}
 
 	// An empty list has no meaning worth guessing at: clearing an entry point

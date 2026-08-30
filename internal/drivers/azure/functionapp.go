@@ -162,7 +162,7 @@ func (d *Driver) planFunctionContainer(
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
+		Reason:      reason(from, want.Version, true, false),
 		Payload: &functionPayload{
 			mode:           modeContainer,
 			linuxFxVersion: "DOCKER|" + next,
@@ -244,7 +244,7 @@ func (d *Driver) planFunctionPackage(
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
+		Reason:      reason(from, want.Version, true, false),
 		Payload: &functionPayload{
 			mode: mode, url: url, settings: next, previous: previous,
 		},

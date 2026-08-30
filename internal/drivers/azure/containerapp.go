@@ -109,13 +109,15 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	next, from, err := nextContainers(current, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextContainers(
+		current, name, want.Version, want.Env, want.ManageEnv, t.Command)
 	if err != nil {
 		return nil, err
 	}
 
 	added, changed, removed := diffContainers(current, next, name, nil)
-	if len(added)+len(changed)+len(removed) == 0 && from == want.Version {
+	command := diffCommand(current, next, name)
+	if len(added)+len(changed)+len(removed)+len(command) == 0 && from == want.Version {
 		return nil, nil
 	}
 
@@ -124,12 +126,14 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
-		EnvAdded:    added,
-		EnvChanged:  changed,
-		EnvRemoved:  removed,
-		PublicURL:   appURL(appFQDN(&app)),
-		Payload:     &appPayload{containers: next, previous: current},
+		Reason: reason(from, want.Version,
+			len(added)+len(changed)+len(removed) > 0, len(command) > 0),
+		EnvAdded:   added,
+		EnvChanged: changed,
+		EnvRemoved: removed,
+		Command:    command,
+		PublicURL:  appURL(appFQDN(&app)),
+		Payload:    &appPayload{containers: next, previous: current},
 	}, nil
 }
 
@@ -516,13 +520,15 @@ func restartCount(n int32) string {
 }
 
 // nextContainers copies the template and replaces the image tag of one
-// container, and its environment when the config declares one. It returns the
-// version that was running, read back from the image tag.
+// container, its environment when the config declares one, and its entry point
+// when the config declares that. It returns the version that was running, read
+// back from the image tag.
 func nextContainers(
 	current []*armappcontainers.Container,
 	name, version string,
 	env []target.EnvVar,
 	manageEnv bool,
+	command []string,
 ) (next []*armappcontainers.Container, from string, err error) {
 	next = make([]*armappcontainers.Container, 0, len(current))
 	for _, c := range current {
@@ -544,6 +550,13 @@ func nextContainers(
 		replaced := *c
 		replaced.Image = to.Ptr(img)
 		replaced.Env = containerEnv(c.Env, renderEnv(env), manageEnv)
+		if len(command) > 0 {
+			// Args go with it. Container Apps follows Kubernetes, where args are
+			// appended to command, so arguments left from what Terraform declared
+			// would extend a command line the config meant to replace.
+			replaced.Command = to.SliceOfPtrs(command...)
+			replaced.Args = nil
+		}
 		next = append(next, &replaced)
 	}
 
@@ -589,11 +602,46 @@ func diffContainers(
 	return added, changed, removed
 }
 
-func reason(from, to string) string {
+// diffCommand reports the entry point the next container carries, when it is
+// not the one the current container has. Nil means unchanged, which is also
+// what a config declaring no command produces: nothing is written, so nothing
+// can differ.
+func diffCommand(current, next []*armappcontainers.Container, name string) []string {
+	have := containerCommand(findContainer(current, name))
+	want := containerCommand(findContainer(next, name))
+	if slices.Equal(have, want) {
+		return nil
+	}
+	return want
+}
+
+func containerCommand(c *armappcontainers.Container) []string {
+	if c == nil {
+		return nil
+	}
+	out := make([]string, 0, len(c.Command))
+	for _, v := range c.Command {
+		out = append(out, derefString(v))
+	}
+	return out
+}
+
+// reason says why a target is being touched, and at an unchanged version it has
+// to name which of the two things a deploy owns has moved. Reading "environment
+// changed" on a release that rewrote an entry point sends the reader looking for
+// a variable that did not change.
+func reason(from, to string, envChanged, commandChanged bool) string {
 	if from != to {
 		return fmt.Sprintf("version %s -> %s", target.VersionOrUnknown(from), to)
 	}
-	return "environment changed"
+	switch {
+	case envChanged && commandChanged:
+		return "environment and command changed"
+	case commandChanged:
+		return "command changed"
+	default:
+		return "environment changed"
+	}
 }
 
 func orNone(s string) string {
@@ -685,7 +733,8 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 		return nil, err
 	}
 
-	next, from, err := nextContainers(base, name, want.Version, want.Env, want.ManageEnv)
+	next, from, err := nextContainers(
+		base, name, want.Version, want.Env, want.ManageEnv, t.Command)
 	if err != nil {
 		return nil, err
 	}
@@ -708,12 +757,13 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 	next = withSide(next, name, sides.Idle.Label, sideEnv, managed)
 
 	added, changed, removed := diffContainers(serving, next, name, managed)
+	command := diffCommand(serving, next, name)
 
 	// Nothing changed here, but the side still needs a revision of its own: the
 	// staged side is only a stack if every app is on it, and a revision can hold
 	// one label at a time so the serving one cannot lend it. Whether this is
 	// deployed is the release's call, not this target's — see Change.Carry.
-	carry := len(added)+len(changed)+len(removed) == 0 && from == want.Version
+	carry := len(added)+len(changed)+len(removed)+len(command) == 0 && from == want.Version
 
 	fqdn := appFQDN(app)
 
@@ -722,14 +772,16 @@ func (d *Driver) planAppBlueGreen(ctx context.Context, want *target.Desired) (*t
 		Target:      t,
 		FromVersion: from,
 		ToVersion:   want.Version,
-		Reason:      reason(from, want.Version),
-		EnvAdded:    added,
-		EnvChanged:  changed,
-		EnvRemoved:  removed,
-		Sides:       sides,
-		Carry:       carry,
-		PublicURL:   appURL(fqdn),
-		Payload:     &bgPayload{containers: next, fqdn: fqdn},
+		Reason: reason(from, want.Version,
+			len(added)+len(changed)+len(removed) > 0, len(command) > 0),
+		EnvAdded:   added,
+		EnvChanged: changed,
+		EnvRemoved: removed,
+		Command:    command,
+		Sides:      sides,
+		Carry:      carry,
+		PublicURL:  appURL(fqdn),
+		Payload:    &bgPayload{containers: next, fqdn: fqdn},
 	}, nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -74,7 +75,7 @@ func (d *Driver) planECS(ctx context.Context, want *target.Desired) (*target.Cha
 		return nil, err
 	}
 
-	desired := renderTaskDef(base, t.Name, name, img, want.Env, want.ManageEnv)
+	desired := renderTaskDef(base, t.Name, name, img, want.Env, want.ManageEnv, t.Command)
 
 	from := currentImageTag(current, name)
 	ch := &target.Change{
@@ -93,6 +94,9 @@ func (d *Driver) planECS(ctx context.Context, want *target.Desired) (*target.Cha
 
 	ch.EnvAdded, ch.EnvChanged, ch.EnvRemoved = diffEnv(
 		haveFP.container(name), wantFP.container(name))
+	if w, h := wantFP.container(name), haveFP.container(name); !slices.Equal(w.Entry, h.Entry) {
+		ch.Command = w.Entry
+	}
 	ch.Reason = ecsReason(base, current, from, want.Version, wantFP, haveFP, name)
 	return ch, nil
 }
@@ -169,13 +173,14 @@ func (d *Driver) revertECS(ctx context.Context, ch *target.Change) error {
 }
 
 // renderTaskDef copies Terraform's base definition and replaces only what this
-// tool owns: the image tag on one container, and — when the config declares an
-// environment — that container's environment.
+// tool owns: the image tag on one container, that container's environment when
+// the config declares one, and its entry point when the config declares that.
 func renderTaskDef(
 	base *ecstypes.TaskDefinition,
 	family, containerName, image string,
 	env []target.EnvVar,
 	manageEnv bool,
+	command []string,
 ) *ecs.RegisterTaskDefinitionInput {
 	containers := make([]ecstypes.ContainerDefinition, len(base.ContainerDefinitions))
 	copy(containers, base.ContainerDefinitions)
@@ -187,6 +192,15 @@ func renderTaskDef(
 		containers[i].Image = awssdk.String(image)
 		containers[i].Environment, containers[i].Secrets = containerEnv(
 			containers[i].Environment, containers[i].Secrets, env, manageEnv)
+		if len(command) > 0 {
+			// EntryPoint, not Command. ECS keeps Docker's names, where
+			// `entryPoint` is what runs and `command` is what is passed to it —
+			// the reverse of the Kubernetes naming Cloud Run and Container Apps
+			// use. Writing the config's whole command line into `Command` would
+			// leave the real entry point in place and append to it.
+			containers[i].EntryPoint = command
+			containers[i].Command = nil
+		}
 	}
 
 	// The family is the target name, not the base name: the base family stays
@@ -343,7 +357,11 @@ type containerFP struct {
 	Image   string
 	Env     map[string]string
 	Secrets map[string]string
-	Rest    string
+	// Entry is entryPoint followed by command, which is the line the container
+	// actually starts on. Kept as one value because that is how it runs: the two
+	// fields are only meaningful concatenated.
+	Entry []string
+	Rest  string
 }
 
 func (f taskFP) container(name string) containerFP {
@@ -422,13 +440,19 @@ func fingerprintContainers(in []ecstypes.ContainerDefinition) []containerFP {
 			fp.Secrets[awssdk.ToString(s.Name)] = awssdk.ToString(s.ValueFrom)
 		}
 
+		fp.Entry = append(append([]string{}, c.EntryPoint...), c.Command...)
+
 		// Everything else on the container comes from the base definition, so
-		// any difference here means Terraform changed the shape.
+		// any difference here means Terraform changed the shape. The entry point
+		// is pulled out of it because the deploy config can own that one, and a
+		// difference there is not the base moving.
 		rest := c
 		rest.Name = nil
 		rest.Image = nil
 		rest.Environment = nil
 		rest.Secrets = nil
+		rest.EntryPoint = nil
+		rest.Command = nil
 		blob, _ := json.Marshal(rest)
 		fp.Rest = string(blob)
 
@@ -492,6 +516,9 @@ func ecsReason(
 	if w.Rest != h.Rest || want.Task != have.Task {
 		parts = append(parts, fmt.Sprintf("base %s:%d changed",
 			awssdk.ToString(base.Family), base.Revision))
+	}
+	if !slices.Equal(w.Entry, h.Entry) {
+		parts = append(parts, "command changed")
 	}
 	if current == nil {
 		parts = append(parts, "service has no task definition yet")
