@@ -77,8 +77,11 @@ reading the config rather than resolved by picking a behaviour for it.
 
 ## `EVOLVE_DEPLOY_SIDE`
 
-Every blue-green target gets `EVOLVE_DEPLOY_SIDE=blue|green` in its environment,
-written by the tool.
+Every blue-green target on Container Apps and Cloud Run gets
+`EVOLVE_DEPLOY_SIDE=blue|green` in its environment, written by the tool. Not on
+ECS, for the same reason `strategy.env` is refused there: its sides are roles
+within one release rather than two standing environments, so there is nothing
+stable for a service to address itself as.
 
 A request cannot carry the side — a header only arrives if every hop forwards it
 — but a service can resolve its own downstream by its own side with nothing to
