@@ -20,6 +20,7 @@ rollback is. It is worth knowing before you pick a cloud to be brave on.
 | `traffic --to <label>` | yes | yes | no — no side to name |
 | `rollback` | any time | any time | until the release finishes |
 | `strategy.env` per side | yes | yes | no |
+| `EVOLVE_DEPLOY_SIDE` written | yes | yes | no |
 
 ## Azure Container Apps
 
