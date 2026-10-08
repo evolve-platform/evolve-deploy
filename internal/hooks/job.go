@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"text/template"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,8 +28,9 @@ type Jobs interface {
 	CheckJob(ctx context.Context, j Job) error
 
 	// RunJob puts the job on j.Version, runs it once and waits until it has
-	// finished, failing when the run did. What it has to say on the way goes to
-	// out, in whole lines.
+	// finished, failing when the run did. A run still going after j.Timeout is
+	// stopped, and fails. What it has to say on the way goes to out, in whole
+	// lines.
 	RunJob(ctx context.Context, j Job, out io.Writer) error
 }
 
@@ -53,6 +55,10 @@ type Job struct {
 	// Base is the task definition family Terraform registers the job's shape
 	// into, <Name>-base unless set. AWS only.
 	Base string
+
+	// Timeout is how long the run may take before it is stopped and the hook
+	// fails. Zero waits for as long as the platform lets it run.
+	Timeout time.Duration
 }
 
 type jobOptions struct {
@@ -62,6 +68,7 @@ type jobOptions struct {
 	Command   []string `yaml:"command"`
 	Target    string   `yaml:"target"`
 	Base      string   `yaml:"base"`
+	Timeout   string   `yaml:"timeout"`
 }
 
 // jobAction runs a Container Apps job, a Cloud Run job or a one-off ECS task — a
@@ -77,7 +84,8 @@ type jobOptions struct {
 // timeout. This changes the image and, for one run, the command, and never
 // creates one that is not there.
 type jobAction struct {
-	o jobOptions
+	o       jobOptions
+	timeout time.Duration
 }
 
 func parseJob(with *yaml.Node) (Action, error) {
@@ -88,16 +96,29 @@ func parseJob(with *yaml.Node) (Action, error) {
 	if o.Name == "" {
 		return nil, errors.New("job: `name` is required")
 	}
+	// Parsed now rather than at the run, so a typo is a config error and not
+	// a failed `after` hook.
+	var timeout time.Duration
+	if o.Timeout != "" {
+		var err error
+		timeout, err = time.ParseDuration(o.Timeout)
+		if err != nil || timeout <= 0 {
+			return nil, fmt.Errorf("job: timeout: %q is not a duration (try 10m or 1h)", o.Timeout)
+		}
+	}
 	// The release's own version, because that is the point: a migration run
 	// against the image that is about to go out, not the one already serving.
 	o.Version = cmp.Or(o.Version, "{{.version}}")
-	return jobAction{o: o}, nil
+	return jobAction{o: o, timeout: timeout}, nil
 }
 
 func (a jobAction) Describe() string {
 	line := fmt.Sprintf("job %s on %s", a.o.Name, a.o.Version)
 	if len(a.o.Command) > 0 {
 		line += ": " + strings.Join(a.o.Command, " ")
+	}
+	if a.o.Timeout != "" {
+		line += " (at most " + a.o.Timeout + ")"
 	}
 	return line
 }
@@ -136,6 +157,7 @@ func (a jobAction) job(service string) Job {
 		Service:   service,
 		Target:    a.o.Target,
 		Base:      a.o.Base,
+		Timeout:   a.timeout,
 	}
 }
 

@@ -72,7 +72,7 @@ func (d *Driver) RunJob(ctx context.Context, j hooks.Job, out io.Writer) (err er
 		}()
 	}
 
-	return d.startJob(ctx, j.Name, out)
+	return d.startJob(ctx, j.Name, j.Timeout, out)
 }
 
 func (d *Driver) prepareJobRun(ctx context.Context, j hooks.Job) (*jobRun, error) {
@@ -112,11 +112,12 @@ func (d *Driver) prepareJobRun(ctx context.Context, j hooks.Job) (*jobRun, error
 
 // startJob starts an execution and waits for it to stop.
 //
-// There is no deadline here. The job has its own — the replica timeout
-// Terraform set — and Container Apps fails the execution when it passes, so a
-// second one here could only be a guess at the same number, and a wrong one
-// would walk away from a migration that is still running.
-func (d *Driver) startJob(ctx context.Context, name string, out io.Writer) error {
+// The job has a deadline of its own — the replica timeout Terraform set — and
+// Container Apps fails the execution when it passes. A hook's timeout is a
+// tighter one for this run: the execution is stopped rather than walked away
+// from, because a migration still running while the release goes ahead is the
+// outcome a timeout is there to prevent.
+func (d *Driver) startJob(ctx context.Context, name string, timeout time.Duration, out io.Writer) error {
 	timer := logging.Start("start container app job", "name", name)
 	poller, err := d.jobs.BeginStart(ctx, d.file.Cloud.ResourceGroup, name, nil)
 	if err != nil {
@@ -133,6 +134,10 @@ func (d *Driver) startJob(ctx context.Context, name string, out io.Writer) error
 	fmt.Fprintf(out, "started execution %s\n", exec)
 
 	begun := time.Now()
+	var expired <-chan time.Time
+	if timeout > 0 {
+		expired = time.After(timeout)
+	}
 	for {
 		got, err := d.executions.JobExecution(ctx, d.file.Cloud.ResourceGroup, name, exec, nil)
 		if err != nil {
@@ -165,7 +170,27 @@ func (d *Driver) startJob(ctx context.Context, name string, out io.Writer) error
 		case <-ctx.Done():
 			return fmt.Errorf("container app job %s: gave up waiting for execution %s, "+
 				"which may still be running: %w", name, exec, ctx.Err())
+		case <-expired:
+			return d.stopExecution(ctx, name, exec, timeout)
 		case <-time.After(d.poll):
 		}
 	}
+}
+
+// stopExecution stops a run that outlived the hook's timeout, and is the
+// failure the hook reports either way.
+func (d *Driver) stopExecution(ctx context.Context, name, exec string, timeout time.Duration) error {
+	late := fmt.Errorf("container app job %s: execution %s ran longer than its timeout of %s",
+		name, exec, timeout)
+
+	// Not the caller's context: it is about to be the reason nobody stops it.
+	stop := context.WithoutCancel(ctx)
+	poller, err := d.jobs.BeginStopExecution(stop, d.file.Cloud.ResourceGroup, name, exec, nil)
+	if err == nil {
+		_, err = poller.PollUntilDone(stop, nil)
+	}
+	if err != nil {
+		return fmt.Errorf("%w, and stopping it failed, so it may still be running: %w", late, err)
+	}
+	return fmt.Errorf("%w and was stopped", late)
 }

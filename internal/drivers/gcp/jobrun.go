@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	run "cloud.google.com/go/run/apiv2"
 	"cloud.google.com/go/run/apiv2/runpb"
 
 	"github.com/evolve-platform/evolve-deploy/internal/hooks"
@@ -68,7 +69,7 @@ func (d *Driver) RunJob(ctx context.Context, j hooks.Job, out io.Writer) (err er
 		}()
 	}
 
-	return d.executeJob(ctx, j.Name, out)
+	return d.executeJob(ctx, j.Name, j.Timeout, out)
 }
 
 func (d *Driver) prepareJobRun(ctx context.Context, j hooks.Job) (*jobRun, error) {
@@ -104,11 +105,11 @@ func (d *Driver) prepareJobRun(ctx context.Context, j hooks.Job) (*jobRun, error
 // executeJob runs the job and waits for the execution to finish.
 //
 // The operation RunJob returns completes when the execution does, not when it
-// starts, so waiting on it is the whole wait. There is no deadline of our own:
-// the job's task timeout is Terraform's, Cloud Run fails the execution when it
-// passes, and a shorter one here would walk away from a migration that is still
-// running.
-func (d *Driver) executeJob(ctx context.Context, name string, out io.Writer) error {
+// starts, so waiting on it is the whole wait. The job's task timeout is
+// Terraform's and Cloud Run fails the execution when it passes; a hook's
+// timeout is a tighter one for this run, and the execution is cancelled rather
+// than walked away from when it passes.
+func (d *Driver) executeJob(ctx context.Context, name string, timeout time.Duration, out io.Writer) error {
 	timer := logging.Start("run cloud run job", "name", name)
 	op, err := d.jobs.RunJob(ctx, &runpb.RunJobRequest{Name: d.jobName(name)})
 	if err != nil {
@@ -124,7 +125,12 @@ func (d *Driver) executeJob(ctx context.Context, name string, out io.Writer) err
 	}
 
 	begun := time.Now()
-	done, err := op.Wait(ctx)
+	wait, cancel := ctx, context.CancelFunc(func() {})
+	if timeout > 0 {
+		wait, cancel = context.WithTimeout(ctx, timeout)
+	}
+	done, err := op.Wait(wait)
+	cancel()
 	took := time.Since(begun).Round(time.Second)
 	if done != nil && done.GetLogUri() != "" {
 		logs = done.GetLogUri()
@@ -135,6 +141,8 @@ func (d *Driver) executeJob(ctx context.Context, name string, out io.Writer) err
 	}
 
 	switch {
+	case ctx.Err() == nil && errors.Is(wait.Err(), context.DeadlineExceeded):
+		return d.cancelExecution(ctx, name, op, timeout, where)
 	case ctx.Err() != nil:
 		return fmt.Errorf("cloud run job %s: gave up waiting after %s, "+
 			"and the execution may still be running%s: %w", name, took, where, ctx.Err())
@@ -150,4 +158,32 @@ func (d *Driver) executeJob(ctx context.Context, name string, out io.Writer) err
 	timer.Done("execution", done.GetName())
 	fmt.Fprintf(out, "execution %s succeeded after %s\n", shortName(done.GetName()), took)
 	return nil
+}
+
+// cancelExecution stops a run that outlived the hook's timeout, and is the
+// failure the hook reports either way.
+func (d *Driver) cancelExecution(
+	ctx context.Context, name string, op *run.RunJobOperation, timeout time.Duration, where string,
+) error {
+	late := fmt.Errorf("cloud run job %s: execution ran longer than its timeout of %s", name, timeout)
+
+	// The name may only have arrived with a poll, so the metadata is read
+	// again rather than kept from the start.
+	meta, err := op.Metadata()
+	if err != nil || meta.GetName() == "" {
+		return fmt.Errorf("%w, and it could not be named to stop it, so it may still be running%s",
+			late, where)
+	}
+
+	// Not the caller's context: it is about to be the reason nobody stops it.
+	stop := context.WithoutCancel(ctx)
+	cancelled, err := d.executions.CancelExecution(stop, &runpb.CancelExecutionRequest{Name: meta.GetName()})
+	if err == nil {
+		_, err = cancelled.Wait(stop)
+	}
+	if err != nil {
+		return fmt.Errorf("%w, and cancelling %s failed, so it may still be running%s: %w",
+			late, shortName(meta.GetName()), where, err)
+	}
+	return fmt.Errorf("%w and %s was cancelled%s", late, shortName(meta.GetName()), where)
 }
