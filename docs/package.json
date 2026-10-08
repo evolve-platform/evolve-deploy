@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "astro check && astro build && node scripts/linkcheck.mjs",
+    "build": "astro check && astro build && node scripts/schemas.mjs && node scripts/linkcheck.mjs",
     "preview": "astro preview",
     "astro": "astro",
-    "linkcheck": "node scripts/linkcheck.mjs"
+    "linkcheck": "node scripts/linkcheck.mjs",
+    "schemas": "node scripts/schemas.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.0",

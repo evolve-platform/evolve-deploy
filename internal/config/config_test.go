@@ -196,7 +196,7 @@ func TestValidation(t *testing.T) {
 		{
 			name: "unknown key is a typo, not something to ignore",
 			body: awsHeader + "services:\n  site:\n    version: a\n    type: ecs\n    cluster: c\n    clsuter: c\n",
-			want: "field clsuter not found",
+			want: "services.site.clsuter: line 11: unknown field (did you mean cluster?)",
 		},
 		{
 			name: "a hook mistake names the entry it is in",
@@ -209,7 +209,7 @@ func TestValidation(t *testing.T) {
       - echo fine
       - {uses: honycomb, with: {dataset: site}}
 `,
-			want: `services.site.after[1]: line 13: uses: "honycomb" is not one of honeycomb, http, job, sentry`,
+			want: `services.site.after[1].uses: line 13: "honycomb" is not one of honeycomb, http, job, sentry`,
 		},
 		{
 			name: "an option the action does not have",
@@ -221,7 +221,7 @@ func TestValidation(t *testing.T) {
     after:
       - {uses: honeycomb, with: {dataset: site, mesage: hi}}
 `,
-			want: "services.site.after[0]: line 12: with: no such option: mesage",
+			want: "services.site.after[0].with.mesage: line 12: unknown option (did you mean message?)",
 		},
 		{
 			name: "a smoke entry is checked the same way",
@@ -235,27 +235,27 @@ services:
     targets:
       - { type: ecs, name: site, cluster: c, test_url: https://site.test }
 `,
-			want: "strategy.smoke[0]: line 9: http: `url` is required",
+			want: "strategy.smoke[0].with.url: line 9: required",
 		},
 		{
 			name: "type must belong to the cloud",
 			body: awsHeader + "services:\n  site:\n    version: a\n    type: cloud-run\n",
-			want: "is not valid on aws",
+			want: `services.site.type: line 9: "cloud-run" is not valid when cloud.provider is aws`,
 		},
 		{
 			name: "addressing from another cloud is a half-finished copy",
 			body: "cloud:\n  provider: aws\n  account: \"1\"\n  region: eu-west-1\n  project: something\nservices:\n  site:\n    version: a\n    type: ecs\n    cluster: c\n",
-			want: "cloud.project: does not apply when provider is aws",
+			want: "cloud.project: line 5: does not apply when provider is aws",
 		},
 		{
 			name: "missing addressing",
 			body: "cloud:\n  provider: aws\nservices:\n  site:\n    version: a\n    type: ecs\n    cluster: c\n",
-			want: "cloud.account: required when provider is aws",
+			want: "cloud.account: line 2: required when provider is aws",
 		},
 		{
 			name: "version is required",
 			body: awsHeader + "services:\n  site:\n    type: ecs\n    cluster: c\n",
-			want: "version is required",
+			want: "services.site.version: line 8: required",
 		},
 		{
 			name: "ecs needs a cluster",
@@ -270,7 +270,7 @@ services:
 		{
 			name: "cluster on a lambda is a copy-paste mistake",
 			body: awsHeader + "services:\n  ev:\n    version: a\n    targets:\n      - type: lambda\n        name: ev\n        cluster: platform\n        code: { bucket: b, key: k }\n",
-			want: "`cluster` only applies to ecs",
+			want: "services.ev.targets[0].cluster: line 12: does not apply when type is lambda",
 		},
 		{
 			name: "neither type nor targets",
@@ -481,7 +481,7 @@ services:
 	}
 
 	_, err = load(t, awsHeader+"services:\n  site:\n    version: a\n    type: cloud-run-job\n")
-	if err == nil || !strings.Contains(err.Error(), "is not valid on aws") {
+	if err == nil || !strings.Contains(err.Error(), "is not valid when cloud.provider is aws") {
 		t.Errorf("err = %v, want a refusal naming aws", err)
 	}
 }
@@ -514,7 +514,7 @@ services:
 	// Still refused where no driver reads it, which is what catches a target
 	// quietly ignoring half its configuration.
 	_, err = load(t, awsHeader+"services:\n  ev:\n    version: a\n    targets:\n      - type: lambda\n        name: ev\n        container: main\n        code: { bucket: b, key: k }\n")
-	if err == nil || !strings.Contains(err.Error(), "`container` does not apply to lambda") {
+	if err == nil || !strings.Contains(err.Error(), "container: line 12: does not apply when type is lambda") {
 		t.Errorf("err = %v, want a refusal naming lambda", err)
 	}
 }
@@ -575,7 +575,7 @@ services:
 	// Refused where the host owns the entry point: a lambda and a function app
 	// are handed a package, not started with a command line.
 	_, err = load(t, awsHeader+"services:\n  ev:\n    version: a\n    targets:\n      - type: lambda\n        name: ev\n        command: [\"node\", \"index.js\"]\n        code: { bucket: b, key: k }\n")
-	if err == nil || !strings.Contains(err.Error(), "`command` does not apply to lambda") {
+	if err == nil || !strings.Contains(err.Error(), "command: line 12: does not apply when type is lambda") {
 		t.Errorf("err = %v, want a refusal naming lambda", err)
 	}
 

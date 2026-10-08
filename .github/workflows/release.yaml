@@ -41,3 +41,18 @@ jobs:
         env:
           GORELEASER_CURRENT_TAG: ${{ env.GORELEASER_CURRENT_TAG }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # A release publishes its config schema through the docs site, which builds
+  # it from the tags. Nothing else would rebuild the site: the tag and the
+  # release are made with GITHUB_TOKEN, and events from that token start no
+  # workflows — the same reason prepare-release dispatches this one.
+  docs:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # dispatch docs.yaml
+    steps:
+      - name: Publish the schema
+        run: gh workflow run docs.yaml --repo "$GITHUB_REPOSITORY" --ref main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
