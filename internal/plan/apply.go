@@ -60,7 +60,7 @@ func Apply(ctx context.Context, p *Plan, o Options) error {
 	// Hook output is tagged with the service that produced it, in a column
 	// sized to the widest name that actually has hooks.
 	o.Hooks.Width = hookWidth(p)
-	// The plan has already refused a `uses: job` on a driver that has none, so
+	// The plan has already refused a job hook on a driver that has none, so
 	// a nil here is never reached by one.
 	if jobs, ok := o.Driver.(hooks.Jobs); ok {
 		o.Hooks.Jobs = jobs

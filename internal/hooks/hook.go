@@ -26,8 +26,11 @@ import (
 var plugins = map[string]func(*yaml.Node) (Action, error){
 	"honeycomb": parseHoneycomb,
 	"http":      parseHTTP,
-	"job":       parseJob,
-	"sentry":    parseSentry,
+	// The three names of one action; see jobClouds.
+	"container-app-job": parseJob("container-app-job"),
+	"cloud-run-job":     parseJob("cloud-run-job"),
+	"ecs-task":          parseJob("ecs-task"),
+	"sentry":            parseSentry,
 }
 
 // An Action is one thing a hook does: a shell command, a marker, a check.
@@ -110,7 +113,7 @@ type Exec struct {
 	// Runner tags them, and a half line from one service lands in the middle
 	// of another's.
 	Out io.Writer
-	// Jobs runs a `uses: job`, and is nil on a cloud that has none.
+	// Jobs runs a job hook, and is nil on a cloud that has none.
 	Jobs Jobs
 }
 

@@ -322,7 +322,7 @@ func (p *Plan) publicLookup() lookupFunc {
 // planned. It also writes the functions onto each service plan, so that the
 // check and the run an hour of staging later resolve the same names.
 //
-// A `uses: job` is also asked of the cloud here, because a job Terraform never
+// A job hook is also asked of the cloud here, because a job Terraform never
 // created is as findable now as a typo is, and far worse to find in an `after`
 // hook.
 func (p *Plan) checkHooks(ctx context.Context, d target.Driver) []string {

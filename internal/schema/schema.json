@@ -257,7 +257,7 @@
       "additionalProperties": false,
       "properties": {
         "cmd": { "description": "A command line, the same as writing it as a plain string.", "$ref": "#/definitions/text" },
-        "uses": { "description": "A named action.", "enum": ["honeycomb", "http", "job", "sentry"] },
+        "uses": { "description": "A named action.", "enum": ["cloud-run-job", "container-app-job", "ecs-task", "honeycomb", "http", "sentry"] },
         "with": { "description": "The action's options.", "type": "object" }
       },
       "allOf": [
@@ -270,8 +270,16 @@
           "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/http-options" } } }
         },
         {
-          "if": { "required": ["uses"], "properties": { "uses": { "const": "job" } } },
-          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/job-options" } } }
+          "if": { "required": ["uses"], "properties": { "uses": { "const": "cloud-run-job" } } },
+          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/cloud-run-job-options" } } }
+        },
+        {
+          "if": { "required": ["uses"], "properties": { "uses": { "const": "container-app-job" } } },
+          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/container-app-job-options" } } }
+        },
+        {
+          "if": { "required": ["uses"], "properties": { "uses": { "const": "ecs-task" } } },
+          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/ecs-task-options" } } }
         },
         {
           "if": { "required": ["uses"], "properties": { "uses": { "const": "sentry" } } },
@@ -312,20 +320,48 @@
         "delay": { "description": "Between attempts. Default 3s.", "$ref": "#/definitions/duration" }
       }
     },
-    "job-options": {
-      "title": "job options",
-      "description": "Runs a job to completion.",
+    "cloud-run-job-options": {
+      "title": "cloud-run-job options",
+      "description": "Runs a Cloud Run job once on the release, and waits for it.",
       "type": "object",
       "additionalProperties": false,
       "required": ["name"],
       "properties": {
-        "name": { "description": "The job, as Terraform named it.", "$ref": "#/definitions/text" },
+        "name": { "description": "The Cloud Run job, as Terraform named it.", "$ref": "#/definitions/text" },
         "container": { "description": "Which container, in a job with sidecars.", "$ref": "#/definitions/text" },
         "version": { "description": "The image tag to run. Default {{.version}}.", "$ref": "#/definitions/text" },
         "command": { "description": "The whole command line, for this one run.", "$ref": "#/definitions/texts" },
-        "target": { "description": "AWS: the ecs target whose cluster and network the task runs in.", "$ref": "#/definitions/text" },
-        "base": { "description": "AWS: the family Terraform registers the task's shape into. Default <name>-base.", "$ref": "#/definitions/text" },
         "timeout": { "description": "How long the run may take before it is stopped, e.g. 15m.", "$ref": "#/definitions/duration" }
+      }
+    },
+    "container-app-job-options": {
+      "title": "container-app-job options",
+      "description": "Runs a Container Apps job once on the release, and waits for it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "description": "The Container Apps job, as Terraform named it.", "$ref": "#/definitions/text" },
+        "container": { "description": "Which container, in a job with sidecars.", "$ref": "#/definitions/text" },
+        "version": { "description": "The image tag to run. Default {{.version}}.", "$ref": "#/definitions/text" },
+        "command": { "description": "The whole command line, for this one run.", "$ref": "#/definitions/texts" },
+        "timeout": { "description": "How long the run may take before it is stopped, e.g. 15m.", "$ref": "#/definitions/duration" }
+      }
+    },
+    "ecs-task-options": {
+      "title": "ecs-task options",
+      "description": "Runs a one-off ECS task on the release, and waits for it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "description": "The task definition family each run is registered into.", "$ref": "#/definitions/text" },
+        "container": { "description": "Which container, in a task with sidecars.", "$ref": "#/definitions/text" },
+        "version": { "description": "The image tag to run. Default {{.version}}.", "$ref": "#/definitions/text" },
+        "command": { "description": "The whole command line, for this one run.", "$ref": "#/definitions/texts" },
+        "timeout": { "description": "How long the run may take before it is stopped, e.g. 15m.", "$ref": "#/definitions/duration" },
+        "base": { "description": "The family Terraform registers the task's shape into. Default <name>-base.", "$ref": "#/definitions/text" },
+        "target": { "description": "The ecs target whose cluster and network the task runs in. Default the service's own.", "$ref": "#/definitions/text" }
       }
     },
     "sentry-options": {

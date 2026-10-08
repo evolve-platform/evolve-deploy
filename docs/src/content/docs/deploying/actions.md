@@ -1,6 +1,6 @@
 ---
 title: Actions
-description: uses honeycomb, sentry, http and job — the hooks that were never really commands.
+description: uses honeycomb, sentry, http, and a job per cloud — the hooks that were never really commands.
 sidebar:
   order: 4
 ---
@@ -124,20 +124,31 @@ route explains itself.
 Unlike the two above, this one **can** fail a release — that is the entire
 point of it.
 
-## `uses: job`
+## `uses: container-app-job`, `cloud-run-job`, `ecs-task`
 
-Runs a job once on the version being released and waits for it to finish — a
-Container Apps job on Azure, a Cloud Run job on GCP, a one-off ECS task on AWS.
+Runs a job once on the version being released and waits for it to finish. One
+action under each cloud's own name, the same as its target type:
+
+| Cloud | | Runs |
+|---|---|---|
+| Azure | `container-app-job` | a Container Apps job |
+| GCP | `cloud-run-job` | a Cloud Run job |
+| AWS | `ecs-task` | a one-off ECS task |
+
+A deploy file already speaks its cloud's language — its targets are
+`container-app` or `cloud-run` or `ecs` — so a neutral name would buy a
+portability no deploy file has. The name for another cloud is refused while
+planning, with the one this cloud uses.
 
 ```yaml
 services:
   wagtail:
     version: abc1234
     before:
-      - uses: job
+      - uses: container-app-job
         with: { name: suz-tst-caj-migrate }
     after:
-      - uses: job
+      - uses: container-app-job
         with:
           name: suz-tst-caj-tasks
           command: [python, manage.py, loadperms]
@@ -150,8 +161,8 @@ services:
 | `container` | which container, in a job with sidecars | as for a target |
 | `version` | the image tag to run | `{{.version}}` |
 | `timeout` | how long the run may take before it is stopped, e.g. `15m` | none |
-| `base` | AWS: the family Terraform registers the task's shape into | `<name>-base` |
-| `target` | AWS: the ecs target whose cluster and network the task runs in | the service's own |
+| `base` | `ecs-task` only: the family Terraform registers the task's shape into | `<name>-base` |
+| `target` | `ecs-task` only: the ecs target whose cluster and network it runs in | the service's own |
 
 **The image is written onto the job before it runs.** A migration has to run
 against what is about to go out, not what is serving — and on Cloud Run an
@@ -172,14 +183,14 @@ the timeout is there to prevent — and the hook fails. Without one the job's ow
 timeout is the only one: Container Apps and Cloud Run fail an execution when it
 passes.
 
-### On AWS
+### `ecs-task`
 
 ECS has no job resource, so a job there is a task definition family and a
 `RunTask` — what `before_deploy` was in ecs-deplojo:
 
 ```yaml
 before:
-  - uses: job
+  - uses: ecs-task
     with:
       name: ask-migrate
       container: uwsgi
@@ -198,11 +209,11 @@ before:
 - **The verdict is the exit code** of the container that ran, not ECS's
   stopped reason, which is the same for a pass and a failure. A failure says
   where the awslogs stream is.
-- **ECS has no task timeout**, so on AWS `timeout` is the only one there is.
+- **ECS has no task timeout**, so here `timeout` is the only one there is.
   Without it a migration that hangs waits until the pipeline gives up.
 
-`base` and `target` are refused on Azure and GCP, where the job is a resource of
-its own and needs neither.
+`base` and `target` are refused on `container-app-job` and `cloud-run-job`,
+where the job is a resource of its own and needs neither.
 
 In `before` a failed run calls the release off like any other hook. In `after`
 it is reported and rolls nothing back. A successful run prints nothing; a

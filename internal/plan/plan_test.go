@@ -481,6 +481,8 @@ type jobsDriver struct {
 	ran    []hooks.Job
 }
 
+func (d *jobsDriver) Name() string { return "aws" }
+
 func (d *jobsDriver) CheckJob(_ context.Context, j hooks.Job) error {
 	if !d.exists[j.Name] {
 		return fmt.Errorf("container app job %s: not found", j.Name)
@@ -502,9 +504,9 @@ services:
     type: ecs
     cluster: platform
     before:
-      - {uses: job, with: {name: migrate}}
+      - {uses: ecs-task, with: {name: migrate}}
     after:
-      - {uses: job, with: {name: loadperms, command: [manage, loadperms, "--env={{.env}}"]}}
+      - {uses: ecs-task, with: {name: loadperms, command: [manage, loadperms, "--env={{.env}}"]}}
 `
 
 func TestAJobHookOnACloudWithoutJobsIsRefusedByThePlan(t *testing.T) {
@@ -515,7 +517,7 @@ func TestAJobHookOnACloudWithoutJobsIsRefusedByThePlan(t *testing.T) {
 	if err == nil {
 		t.Fatal("a job hook was planned on a cloud that cannot run one")
 	}
-	if !strings.Contains(err.Error(), "services.wagtail: before hook: job:") {
+	if !strings.Contains(err.Error(), "services.wagtail: before hook: ecs-task:") {
 		t.Errorf("error was %q, and has to say which hook", err)
 	}
 }
@@ -531,8 +533,28 @@ func TestAJobTerraformNeverCreatedIsRefusedByThePlan(t *testing.T) {
 	if err == nil {
 		t.Fatal("a job that does not exist was planned")
 	}
-	if !strings.Contains(err.Error(), "after hook: job: container app job loadperms: not found") {
+	if !strings.Contains(err.Error(), "after hook: ecs-task: container app job loadperms: not found") {
 		t.Errorf("error was %q", err)
+	}
+}
+
+func TestAJobHookForAnotherCloudIsRefusedByThePlan(t *testing.T) {
+	// The name is the cloud's own, the same as its target type, so the wrong
+	// one is a typo worth naming the right one for.
+	d := &jobsDriver{fakeDriver: newFakeDriver(), exists: map[string]bool{"migrate": true}}
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	_, err := Build(context.Background(), load(t, header+`
+services:
+  wagtail:
+    version: v2
+    type: ecs
+    cluster: platform
+    before:
+      - {uses: cloud-run-job, with: {name: migrate}}
+`), d, nil)
+	if err == nil || !strings.Contains(err.Error(), "cloud-run-job is gcp's; on aws this is `uses: ecs-task`") {
+		t.Errorf("error was %v", err)
 	}
 }
 
