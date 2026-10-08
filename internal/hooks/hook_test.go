@@ -81,7 +81,7 @@ func TestRefusedEntries(t *testing.T) {
 		{"misspelt field", `{use: http}`,
 			`"use" is not a hook field`},
 		{"unknown action", `{uses: honycomb, with: {dataset: x}}`,
-			`uses: "honycomb" is not one of honeycomb, http, sentry`},
+			`uses: "honycomb" is not one of honeycomb, http, job, sentry`},
 		{"cmd is not an action", `{uses: cmd}`,
 			`uses: "cmd" is not one of`},
 		{"a list is not a hook", `[a, b]`,

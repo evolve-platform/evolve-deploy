@@ -91,11 +91,11 @@ func protectedRevisions(svc *runpb.Service) map[string]string {
 		}
 		switch {
 		case w.GetPercent() > 0:
-			keep(shortRevision(w.GetRevision()), "serving traffic")
+			keep(shortName(w.GetRevision()), "serving traffic")
 		case w.GetTag() != "":
-			keep(shortRevision(w.GetRevision()), fmt.Sprintf("tagged %s", w.GetTag()))
+			keep(shortName(w.GetRevision()), fmt.Sprintf("tagged %s", w.GetTag()))
 		default:
-			keep(shortRevision(w.GetRevision()), "named in the traffic block")
+			keep(shortName(w.GetRevision()), "named in the traffic block")
 		}
 	}
 	if label, revision, ok := parseRollback(svc.GetAnnotations()); ok {
@@ -105,8 +105,8 @@ func protectedRevisions(svc *runpb.Service) map[string]string {
 	// Whatever the traffic block resolves to when it says "the newest", plus the
 	// newest itself: a revision created moments ago that has not gone live yet
 	// is not rubbish, it is a release in progress.
-	keep(shortRevision(svc.GetLatestReadyRevision()), "the newest ready revision")
-	keep(shortRevision(svc.GetLatestCreatedRevision()), "the newest revision")
+	keep(shortName(svc.GetLatestReadyRevision()), "the newest ready revision")
+	keep(shortName(svc.GetLatestCreatedRevision()), "the newest revision")
 
 	return out
 }
@@ -174,7 +174,7 @@ func (d *Driver) listRevisions(
 		if err != nil {
 			return nil, fmt.Errorf("listing revisions of %s: %w", service, err)
 		}
-		r := prunableRevision{name: shortRevision(rev.GetName())}
+		r := prunableRevision{name: shortName(rev.GetName())}
 		if ts := rev.GetCreateTime(); ts != nil {
 			r.created = ts.AsTime()
 		}

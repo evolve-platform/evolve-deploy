@@ -50,6 +50,10 @@ type Runner struct {
 	// everything it printed, because that output is the diagnosis.
 	Verbose bool
 
+	// Jobs is the cloud a `uses: job` runs on. Nil where the driver has no
+	// jobs, which the plan has already refused.
+	Jobs Jobs
+
 	// mu serialises writes to Out. Every service's hooks write whole lines,
 	// but whole lines from two processes still land on top of each other
 	// without one lock between them.
@@ -131,7 +135,7 @@ func (r *Runner) RunWith(
 		}
 
 		var note noted
-		switch err := step.Run(ctx, &Exec{Dir: r.Dir, Out: sink}); {
+		switch err := step.Run(ctx, &Exec{Dir: r.Dir, Out: sink, Jobs: r.Jobs}); {
 		case err == nil:
 		case errors.As(err, &note):
 			// Straight to Out rather than through the sink, because this is the
@@ -240,6 +244,31 @@ func ValidateWith(hooks []*Hook, data any, funcs template.FuncMap) error {
 			if err := c.Check(); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// Probe renders every hook and asks the cloud about the ones that run there.
+//
+// Separate from ValidateWith because it reads the cloud and the rest of
+// validation does not: smoke commands are checked against urls that do not
+// exist yet and need nothing but the file. A job is different — whether it is
+// there is a fact about the cloud, and one that must not first be learnt from
+// an `after` hook. jobs is nil on a cloud that has none, and a `uses: job` there
+// is refused here.
+func Probe(ctx context.Context, hooks []*Hook, data any, funcs template.FuncMap, jobs Jobs) error {
+	for _, hook := range hooks {
+		action, err := hook.Action()
+		if err != nil {
+			return err
+		}
+		step, err := action.Render(data, funcs)
+		if err != nil {
+			return err
+		}
+		if err := step.Probe(ctx, &Exec{Out: io.Discard, Jobs: jobs}); err != nil {
+			return err
 		}
 	}
 	return nil

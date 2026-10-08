@@ -321,8 +321,13 @@ func (p *Plan) publicLookup() lookupFunc {
 // the set of names it can resolve is only settled once every service has been
 // planned. It also writes the functions onto each service plan, so that the
 // check and the run an hour of staging later resolve the same names.
-func (p *Plan) checkHooks() []string {
+//
+// A `uses: job` is also asked of the cloud here, because a job Terraform never
+// created is as findable now as a typo is, and far worse to find in an `after`
+// hook.
+func (p *Plan) checkHooks(ctx context.Context, d target.Driver) []string {
 	funcs := HookFuncs(p.publicLookup())
+	jobs, _ := d.(hooks.Jobs)
 
 	var msgs []string
 	for _, cp := range p.Services {
@@ -336,7 +341,11 @@ func (p *Plan) checkHooks() []string {
 			name string
 			hs   []*hooks.Hook
 		}{{"before", cp.Service.Before}, {"after", cp.Service.After}} {
-			if err := hooks.ValidateWith(ph.hs, cp.HookVars().Data(), funcs); err != nil {
+			err := hooks.ValidateWith(ph.hs, cp.HookVars().Data(), funcs)
+			if err == nil {
+				err = hooks.Probe(ctx, ph.hs, cp.HookVars().Data(), funcs, jobs)
+			}
+			if err != nil {
 				msgs = append(msgs, fmt.Sprintf("services.%s: %s hook: %v",
 					cp.Service.Name, ph.name, err))
 			}
@@ -352,7 +361,7 @@ func (p *Plan) checkHooks() []string {
 // here. What is checked is that the commands parse and that every name they ask
 // for is one this release will actually stage — both of which a typo gets wrong,
 // and both far better found now than after a staging phase that took minutes.
-func (p *Plan) checkSmoke() error {
+func (p *Plan) checkSmoke(ctx context.Context, d target.Driver) error {
 	smoke := p.SmokeHooks()
 	if len(smoke) == 0 {
 		return nil
@@ -369,6 +378,10 @@ func (p *Plan) checkSmoke() error {
 	})
 
 	if err := hooks.ValidateWith(smoke, p.SmokeVars(), funcs); err != nil {
+		return fmt.Errorf("strategy.smoke: %w", err)
+	}
+	jobs, _ := d.(hooks.Jobs)
+	if err := hooks.Probe(ctx, smoke, p.SmokeVars(), funcs, jobs); err != nil {
 		return fmt.Errorf("strategy.smoke: %w", err)
 	}
 	return nil
@@ -460,14 +473,14 @@ func Build(
 			strings.Join(msgs, "\n  - "))
 	}
 
-	if msgs := p.checkHooks(); len(msgs) > 0 {
+	if msgs := p.checkHooks(ctx, d); len(msgs) > 0 {
 		return nil, fmt.Errorf("plan failed, nothing was deployed:\n  - %s",
 			strings.Join(msgs, "\n  - "))
 	}
 
 	// Last, because the names a smoke command may use are only settled once
 	// every service has been planned and the carried ones dropped.
-	if err := p.checkSmoke(); err != nil {
+	if err := p.checkSmoke(ctx, d); err != nil {
 		return nil, fmt.Errorf("plan failed, nothing was deployed:\n  - %w", err)
 	}
 	return p, nil

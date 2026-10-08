@@ -278,11 +278,11 @@ func TestTidyTraffic(t *testing.T) {
 // path in another. A traffic block is written with the bare name.
 func TestShortRevision(t *testing.T) {
 	const want = "site-00007-abc"
-	if got := shortRevision(
+	if got := shortName(
 		"projects/p/locations/europe-west4/services/site/revisions/" + want); got != want {
 		t.Errorf("short = %q", got)
 	}
-	if got := shortRevision(want); got != want {
+	if got := shortName(want); got != want {
 		t.Errorf("a bare name should come back unchanged, got %q", got)
 	}
 }

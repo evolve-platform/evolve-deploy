@@ -141,7 +141,7 @@ func (d *Driver) sidesOf(
 	// Which revision that is, is the service's own answer and not ours to
 	// guess.
 	if sides.Active.Revision == "" && sides.PinNeeded {
-		sides.Active.Revision = shortRevision(svc.GetLatestReadyRevision())
+		sides.Active.Revision = shortName(svc.GetLatestReadyRevision())
 		if sides.Active.Revision == "" {
 			return nil, fmt.Errorf(
 				"cloud run service %s routes to whatever is newest and has no ready "+
@@ -257,7 +257,7 @@ func readSides(traffic []*runpb.TrafficTarget, labels []string) (*target.Sides, 
 
 	idleLabel := labels[1-idx]
 	sides := &target.Sides{
-		Active: target.Side{Label: tag, Revision: shortRevision(active.GetRevision())},
+		Active: target.Side{Label: tag, Revision: shortName(active.GetRevision())},
 		// The idle tag may not exist yet: a service that has only ever been
 		// deployed once has one side and no other.
 		Idle: target.Side{Label: idleLabel},
@@ -267,7 +267,7 @@ func readSides(traffic []*runpb.TrafficTarget, labels []string) (*target.Sides, 
 		PinNeeded: active.GetType() == runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST,
 	}
 	if w, ok := byTag[idleLabel]; ok {
-		sides.Idle.Revision = shortRevision(w.GetRevision())
+		sides.Idle.Revision = shortName(w.GetRevision())
 	}
 	return sides, nil
 }
@@ -308,8 +308,8 @@ func sameRevision(a, b *runpb.TrafficTarget) bool {
 	if a.GetType() == latest || b.GetType() == latest {
 		return a.GetType() == b.GetType()
 	}
-	rev := shortRevision(a.GetRevision())
-	return rev != "" && rev == shortRevision(b.GetRevision())
+	rev := shortName(a.GetRevision())
+	return rev != "" && rev == shortName(b.GetRevision())
 }
 
 // describeTraffic renders a traffic block for an error message. Whoever reads a
@@ -323,7 +323,7 @@ func describeTraffic(traffic []*runpb.TrafficTarget) string {
 		if w == nil {
 			continue
 		}
-		revision := shortRevision(w.GetRevision())
+		revision := shortName(w.GetRevision())
 		if w.GetType() == runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST {
 			revision = "(latest)"
 		}
@@ -359,9 +359,10 @@ type trafficEntry struct {
 	weight int32
 }
 
-// shortRevision drops the resource path Cloud Run returns in some fields and
-// keeps in others. A traffic block is written with the bare name.
-func shortRevision(name string) string {
+// shortName drops the resource path Cloud Run returns in some fields and
+// keeps in others. A traffic block is written with the bare name, and an
+// execution is easier to find by it than by the six segments in front.
+func shortName(name string) string {
 	if i := strings.LastIndex(name, "/"); i >= 0 {
 		return name[i+1:]
 	}
@@ -471,7 +472,7 @@ func (d *Driver) Stage(ctx context.Context, ch *target.Change) (*target.Staged, 
 	if err != nil {
 		return nil, err
 	}
-	staged := shortRevision(svc.GetLatestCreatedRevision())
+	staged := shortName(svc.GetLatestCreatedRevision())
 	if staged == "" {
 		return nil, fmt.Errorf("cloud run service %s reported no revision after staging", name)
 	}
@@ -682,10 +683,10 @@ func pointTraffic(
 		}
 		names = append(names, tag)
 		if tag == label {
-			revision = shortRevision(w.GetRevision())
+			revision = shortName(w.GetRevision())
 			continue
 		}
-		others = append(others, target.Side{Label: tag, Revision: shortRevision(w.GetRevision())})
+		others = append(others, target.Side{Label: tag, Revision: shortName(w.GetRevision())})
 	}
 
 	// The side asked for may have no tag in the block at all. That is the
@@ -753,7 +754,7 @@ func (d *Driver) Traffic(ctx context.Context, t *config.Target) ([]target.Traffi
 		}
 		e := target.TrafficEntry{
 			Label:    w.GetTag(),
-			Revision: shortRevision(w.GetRevision()),
+			Revision: shortName(w.GetRevision()),
 			Weight:   int(w.GetPercent()),
 			Latest: w.GetType() ==
 				runpb.TrafficTargetAllocationType_TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST,

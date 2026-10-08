@@ -26,6 +26,7 @@ import (
 var plugins = map[string]func(*yaml.Node) (Action, error){
 	"honeycomb": parseHoneycomb,
 	"http":      parseHTTP,
+	"job":       parseJob,
 	"sentry":    parseSentry,
 }
 
@@ -48,8 +49,9 @@ type Action interface {
 // Honeycomb: a marker reading `purchase {{.version}}` is worse than no marker,
 // because it looks like it worked.
 type Step struct {
-	line string
-	run  func(context.Context, *Exec) error
+	line  string
+	run   func(context.Context, *Exec) error
+	probe func(context.Context, *Exec) error
 }
 
 // Line is what the step will do, with its variables filled in.
@@ -57,6 +59,15 @@ func (s Step) Line() string { return s.line }
 
 // Run does the thing.
 func (s Step) Run(ctx context.Context, e *Exec) error { return s.run(ctx, e) }
+
+// Probe asks the cloud whether the step could run, without running it. Nil for
+// a step that needs nothing from the cloud, which is every step but a job.
+func (s Step) Probe(ctx context.Context, e *Exec) error {
+	if s.probe == nil {
+		return nil
+	}
+	return s.probe(ctx, e)
+}
 
 // noted is a failure that is reported and then forgiven.
 //
@@ -99,6 +110,8 @@ type Exec struct {
 	// Runner tags them, and a half line from one service lands in the middle
 	// of another's.
 	Out io.Writer
+	// Jobs runs a `uses: job`, and is nil on a cloud that has none.
+	Jobs Jobs
 }
 
 // Hook is one entry in before, after or smoke.
