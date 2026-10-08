@@ -66,6 +66,10 @@ func TestAJobRunsOnTheVersionBeingReleased(t *testing.T) {
 	if j.Name != "suz-tst-migrate" || j.Version != "abc1234" {
 		t.Errorf("ran %+v", j)
 	}
+	// The hook's own service, which is where AWS finds a network to run in.
+	if j.Service != "purchase" {
+		t.Errorf("service = %q", j.Service)
+	}
 	if strings.Join(j.Command, " ") != "manage migrate" {
 		t.Errorf("command = %q", j.Command)
 	}
@@ -94,7 +98,7 @@ func TestAFailedJobPrintsWhatItSaid(t *testing.T) {
 func TestAJobOnACloudWithoutJobsIsRefusedByTheProbe(t *testing.T) {
 	h := jobHook(t, `{uses: job, with: {name: migrate}}`)
 	err := Probe(context.Background(), []*Hook{h}, deploy().Data(), nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "works on azure and gcp") {
+	if err == nil || !strings.Contains(err.Error(), "has no jobs a hook can run") {
 		t.Errorf("error was %v", err)
 	}
 
