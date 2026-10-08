@@ -473,6 +473,100 @@ services:
 	}
 }
 
+// jobsDriver is a fakeDriver on a cloud that has jobs a hook can run.
+type jobsDriver struct {
+	*fakeDriver
+	// exists names the jobs Terraform created.
+	exists map[string]bool
+	ran    []hooks.Job
+}
+
+func (d *jobsDriver) CheckJob(_ context.Context, j hooks.Job) error {
+	if !d.exists[j.Name] {
+		return fmt.Errorf("container app job %s: not found", j.Name)
+	}
+	return nil
+}
+
+func (d *jobsDriver) RunJob(_ context.Context, j hooks.Job, _ io.Writer) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ran = append(d.ran, j)
+	return nil
+}
+
+const jobService = `
+services:
+  wagtail:
+    version: v2
+    type: ecs
+    cluster: platform
+    before:
+      - {uses: job, with: {name: migrate}}
+    after:
+      - {uses: job, with: {name: loadperms, command: [manage, loadperms, "--env={{.env}}"]}}
+`
+
+func TestAJobHookOnACloudWithoutJobsIsRefusedByThePlan(t *testing.T) {
+	d := newFakeDriver()
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	_, err := Build(context.Background(), load(t, header+jobService), d, nil)
+	if err == nil {
+		t.Fatal("a job hook was planned on a cloud that cannot run one")
+	}
+	if !strings.Contains(err.Error(), "services.wagtail: before hook: job:") {
+		t.Errorf("error was %q, and has to say which hook", err)
+	}
+}
+
+func TestAJobTerraformNeverCreatedIsRefusedByThePlan(t *testing.T) {
+	// Not created here: the job is Terraform's, with its environment, its
+	// secrets and its identity, and a missing one is found while nothing has
+	// been written rather than by an `after` hook on a release that went out.
+	d := &jobsDriver{fakeDriver: newFakeDriver(), exists: map[string]bool{"migrate": true}}
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	_, err := Build(context.Background(), load(t, header+jobService), d, nil)
+	if err == nil {
+		t.Fatal("a job that does not exist was planned")
+	}
+	if !strings.Contains(err.Error(), "after hook: job: container app job loadperms: not found") {
+		t.Errorf("error was %q", err)
+	}
+}
+
+func TestAJobHookRunsOnTheReleasesVersion(t *testing.T) {
+	d := &jobsDriver{fakeDriver: newFakeDriver(),
+		exists: map[string]bool{"migrate": true, "loadperms": true}}
+	d.caps[config.TypeECS] = target.Capability{NativeParam: true, NativeSecret: true}
+
+	p, err := Build(context.Background(), load(t, header+jobService), d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Apply(context.Background(), p, Options{
+		Driver: d,
+		Hooks:  &hooks.Runner{Out: io.Discard},
+		Out:    io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(d.ran) != 2 {
+		t.Fatalf("ran %v, want migrate and then loadperms", d.ran)
+	}
+	migrate, perms := d.ran[0], d.ran[1]
+	if migrate.Name != "migrate" || migrate.Version != "v2" || migrate.Command != nil {
+		t.Errorf("before ran %+v, want migrate on v2 with its own command", migrate)
+	}
+	want := []string{"manage", "loadperms", "--env=tst"}
+	if perms.Name != "loadperms" || perms.Version != "v2" || !slices.Equal(perms.Command, want) {
+		t.Errorf("after ran %+v, want loadperms on v2 running %v", perms, want)
+	}
+}
+
 func TestABrokenBeforeHookStopsTheWholeRelease(t *testing.T) {
 	// The gate is the release, not the service. A schema check that fails on
 	// purchase means the release is already lost, so site must not go out

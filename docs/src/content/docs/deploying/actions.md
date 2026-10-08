@@ -1,6 +1,6 @@
 ---
 title: Actions
-description: uses honeycomb, sentry and http — the hooks that were never really commands.
+description: uses honeycomb, sentry, http and job — the hooks that were never really commands.
 sidebar:
   order: 4
 ---
@@ -123,6 +123,52 @@ route explains itself.
 
 Unlike the two above, this one **can** fail a release — that is the entire
 point of it.
+
+## `uses: job`
+
+Runs a job once on the version being released and waits for it to finish — a
+Container Apps job on Azure, a Cloud Run job on GCP.
+
+```yaml
+services:
+  wagtail:
+    version: abc1234
+    before:
+      - uses: job
+        with: { name: suz-tst-caj-migrate }
+    after:
+      - uses: job
+        with:
+          name: suz-tst-caj-tasks
+          command: [python, manage.py, loadperms]
+```
+
+| Option | | Default |
+|---|---|---|
+| `name` | the job, as Terraform named it | **required** |
+| `command` | the whole command line, for this one run | the job's own |
+| `container` | which container, in a job with sidecars | as for a target |
+| `version` | the image tag to run | `{{.version}}` |
+
+**The image is written onto the job before it runs.** A migration has to run
+against what is about to go out, not what is serving — and on Cloud Run an
+execution cannot be handed an image of its own. The job keeps that version
+afterwards, and a second apply of the same release does not write it again.
+
+**A `command` is for one run.** It replaces the job's command line, arguments
+included, and Terraform's goes back once the run is over, whether it worked or
+not. Without one the job runs what it was declared with.
+
+**The job is Terraform's.** Its environment, secrets, identity and timeout are
+left alone, and a job that does not exist is refused while planning rather than
+created. So is `uses: job` on AWS, which has no jobs a hook can run.
+
+There is no timeout of the tool's own: the job's is the one that counts, and the
+platform fails the execution when it passes.
+
+In `before` a failed run calls the release off like any other hook. In `after`
+it is reported and rolls nothing back. A successful run prints nothing; a
+failed one names the execution, and on Cloud Run links to its logs.
 
 ## Anything else stays a command
 

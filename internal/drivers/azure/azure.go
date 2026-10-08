@@ -54,6 +54,9 @@ type Driver struct {
 	revisions *armappcontainers.ContainerAppsRevisionsClient
 	replicas  *armappcontainers.ContainerAppsRevisionReplicasClient
 
+	// executions reads one run of a job, for a `uses: job` waiting on it.
+	executions *armappcontainers.ContainerAppsAPIClient
+
 	// cred is kept because the function-app driver talks to the SCM site over
 	// plain HTTP rather than through ARM, and has to fetch its own token.
 	cred azcore.TokenCredential
@@ -111,9 +114,14 @@ func newDriver(f *config.File, cred azcore.TokenCredential, opts *arm.ClientOpti
 		return nil, fmt.Errorf("azure: %w", err)
 	}
 
+	executions, err := armappcontainers.NewContainerAppsAPIClient(f.Cloud.Subscription, cred, opts)
+	if err != nil {
+		return nil, fmt.Errorf("azure: %w", err)
+	}
+
 	d := &Driver{
 		file: f, apps: apps, jobs: jobs, sites: sites, cred: cred,
-		revisions: revisions, replicas: replicas,
+		revisions: revisions, replicas: replicas, executions: executions,
 		// Long enough for a package upload on a slow link; the deployment
 		// itself is waited for separately.
 		http: &http.Client{Timeout: 5 * time.Minute},
