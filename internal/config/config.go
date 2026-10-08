@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/evolve-platform/evolve-deploy/internal/hooks"
+	"github.com/evolve-platform/evolve-deploy/internal/schema"
 )
 
 // Cloud is the platform a config file targets. One cloud per repo.
@@ -457,10 +458,27 @@ func Load(path, env string) (*File, error) {
 		return nil, err
 	}
 
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if doc.Kind == 0 {
+		return nil, fmt.Errorf("%s: the file is empty", path)
+	}
+
+	// The schema goes first, because it can say what is wrong with every key
+	// in the file at once and where each one is. The decoder stops at the
+	// first value it cannot place and names a Go type the reader has never
+	// seen, and a file that fails it never reaches the checks below.
+	if msgs := schema.Check(&doc); len(msgs) > 0 {
+		return nil, fmt.Errorf("%s is invalid:\n  - %s", path, strings.Join(msgs, "\n  - "))
+	}
+
 	var f File
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
-	// Strict: an unrecognised key is a typo, and a silently ignored typo in a
-	// deploy config is how you ship the wrong thing.
+	// Strict all the same. A file the schema accepted should never fail
+	// here, and if it does the schema has fallen behind the types, which is
+	// better found as an error than as a key quietly ignored.
 	dec.KnownFields(true)
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

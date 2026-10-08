@@ -1,0 +1,350 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://deploy.evolve-platform.com/schema/latest.json",
+  "title": "deploy config",
+  "description": "An evolve-deploy config file, deploy/<env>.yaml. See https://deploy.evolve-platform.com/reference/config/",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cloud", "services"],
+  "properties": {
+    "cloud": { "$ref": "#/definitions/cloud" },
+    "refs": { "$ref": "#/definitions/refs" },
+    "strategy": { "$ref": "#/definitions/strategy" },
+    "services": {
+      "description": "Every unit of release in this environment, by name.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/definitions/service" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["cloud"], "properties": { "cloud": { "required": ["provider"], "properties": { "provider": { "const": "aws" } } } } },
+      "then": { "properties": { "services": { "additionalProperties": { "properties": {
+        "type": { "enum": ["ecs", "lambda"] },
+        "targets": { "items": { "properties": { "type": { "enum": ["ecs", "lambda"] } } } }
+      } } } } }
+    },
+    {
+      "if": { "required": ["cloud"], "properties": { "cloud": { "required": ["provider"], "properties": { "provider": { "const": "gcp" } } } } },
+      "then": { "properties": { "services": { "additionalProperties": { "properties": {
+        "type": { "enum": ["cloud-run", "cloud-run-job"] },
+        "targets": { "items": { "properties": { "type": { "enum": ["cloud-run", "cloud-run-job"] } } } }
+      } } } } }
+    },
+    {
+      "if": { "required": ["cloud"], "properties": { "cloud": { "required": ["provider"], "properties": { "provider": { "const": "azure" } } } } },
+      "then": { "properties": { "services": { "additionalProperties": { "properties": {
+        "type": { "enum": ["container-app", "container-app-job", "function-app"] },
+        "targets": { "items": { "properties": { "type": { "enum": ["container-app", "container-app-job", "function-app"] } } } }
+      } } } } }
+    },
+    {
+      "if": { "required": ["cloud"], "properties": { "cloud": { "required": ["provider"], "properties": { "provider": { "const": "kubernetes" } } } } },
+      "then": { "properties": { "services": { "additionalProperties": { "properties": {
+        "type": { "enum": ["helm"] },
+        "targets": { "items": { "properties": { "type": { "enum": ["helm"] } } } }
+      } } } } }
+    }
+  ],
+  "definitions": {
+    "text": {
+      "$comment": "Every string field also takes a number or a boolean, because the YAML decoder hands those to a string field as written: `version: 1234567` and `PORT: 8080` have always worked and must go on working.",
+      "type": ["string", "number", "boolean"]
+    },
+    "texts": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/text" }
+    },
+    "env": {
+      "description": "Environment variables, KEY: value. Values may be references such as ${secret:NAME} or ${param:PATH}.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/text" }
+    },
+    "duration": {
+      "$comment": "Checked as a Go duration by the tool itself, which can say what is wrong with it.",
+      "$ref": "#/definitions/text"
+    },
+
+    "cloud": {
+      "title": "cloud",
+      "description": "Where a deploy goes. `provider` selects which of the other fields apply, and the rest are refused.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": { "description": "The platform this file targets.", "enum": ["aws", "gcp", "azure", "kubernetes"] },
+        "account": { "description": "aws: the account ID, checked against sts:GetCallerIdentity. Quote it, or a leading zero is lost.", "$ref": "#/definitions/text" },
+        "region": { "description": "aws, gcp: the region.", "$ref": "#/definitions/text" },
+        "project": { "description": "gcp: the project ID.", "$ref": "#/definitions/text" },
+        "subscription": { "description": "azure: the subscription ID.", "$ref": "#/definitions/text" },
+        "resource_group": { "description": "azure: the resource group.", "$ref": "#/definitions/text" },
+        "app_config": { "description": "azure: the App Configuration endpoint. Only needed when a ${param:...} reference is used.", "$ref": "#/definitions/text" },
+        "context": { "description": "kubernetes: the kubeconfig context.", "$ref": "#/definitions/text" },
+        "namespace": { "description": "kubernetes: the namespace.", "$ref": "#/definitions/text" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["provider"], "properties": { "provider": { "const": "aws" } } },
+          "then": {
+            "required": ["account", "region"],
+            "properties": { "project": false, "subscription": false, "resource_group": false, "app_config": false, "context": false, "namespace": false }
+          }
+        },
+        {
+          "if": { "required": ["provider"], "properties": { "provider": { "const": "gcp" } } },
+          "then": {
+            "required": ["project", "region"],
+            "properties": { "account": false, "subscription": false, "resource_group": false, "app_config": false, "context": false, "namespace": false }
+          }
+        },
+        {
+          "if": { "required": ["provider"], "properties": { "provider": { "const": "azure" } } },
+          "then": {
+            "required": ["subscription", "resource_group"],
+            "properties": { "account": false, "region": false, "project": false, "context": false, "namespace": false }
+          }
+        },
+        {
+          "if": { "required": ["provider"], "properties": { "provider": { "const": "kubernetes" } } },
+          "then": {
+            "required": ["context", "namespace"],
+            "properties": { "account": false, "region": false, "project": false, "subscription": false, "resource_group": false, "app_config": false }
+          }
+        }
+      ]
+    },
+
+    "refs": {
+      "title": "refs",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resolve": {
+          "description": "`deny` refuses to read any reference value, at the cost of not being able to deploy Lambda targets that carry one. Default `allow`.",
+          "enum": ["allow", "deny"]
+        }
+      }
+    },
+
+    "strategy": {
+      "title": "strategy",
+      "description": "The shape of a release. At the top level it is the default for every service; a service overrides it field by field.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": { "description": "`direct` (the default) or `blue-green`.", "enum": ["direct", "blue-green"] },
+        "smoke": { "description": "Hooks run once against the staged side, after everything has staged and before any traffic moves. File level only.", "$ref": "#/definitions/hooks" },
+        "labels": { "description": "The two side names. Default [blue, green].", "$ref": "#/definitions/texts" },
+        "env": {
+          "description": "Environment per side, { <label>: { KEY: value } }. Every side must name the same variables.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/env" }
+        },
+        "keep_warm": { "description": "Leave the previous version running after the switch. Container Apps only.", "type": "boolean" },
+        "bake_time": { "description": "How long before ECS terminates the old side, e.g. 10m. ECS only; also the rollback window.", "$ref": "#/definitions/duration" }
+      }
+    },
+
+    "service": {
+      "title": "service",
+      "description": "One unit of release: a single version, one or more deployables.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {
+        "version": { "description": "The image tag, or the version substituted into a package path.", "$ref": "#/definitions/text" },
+        "type": { "description": "The target type, for the short form: one target named after the service.", "$ref": "#/definitions/target-type" },
+        "targets": { "description": "The deployables of this service. Omit for the short form.", "type": "array", "items": { "$ref": "#/definitions/target" } },
+        "env": { "$ref": "#/definitions/env" },
+        "envFrom": { "description": "${param:...} references to JSON objects whose keys become environment variables.", "$ref": "#/definitions/texts" },
+        "cluster": { "description": "Inherited by ecs targets.", "$ref": "#/definitions/text" },
+        "base": { "description": "Inherited by ecs targets. Default <name>-base.", "$ref": "#/definitions/text" },
+        "container": { "description": "Inherited by the targets that run a container.", "$ref": "#/definitions/text" },
+        "code": { "description": "Inherited by lambda and function-app targets.", "$ref": "#/definitions/code" },
+        "strategy": { "$ref": "#/definitions/strategy" },
+        "before": { "description": "Hooks that gate the whole release.", "$ref": "#/definitions/hooks" },
+        "after": { "description": "Hooks run once this service's targets have all succeeded.", "$ref": "#/definitions/hooks" },
+        "depends_on": { "description": "Services that must finish before this one starts.", "$ref": "#/definitions/texts" }
+      }
+    },
+
+    "target-type": {
+      "enum": ["ecs", "lambda", "cloud-run", "cloud-run-job", "container-app", "container-app-job", "function-app", "helm"]
+    },
+
+    "target": {
+      "title": "target",
+      "description": "A single deployable resource.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "$ref": "#/definitions/target-type" },
+        "name": { "description": "The resource name. Defaults to the service name.", "$ref": "#/definitions/text" },
+        "env": { "description": "Adds to, and overrides, the service's env.", "$ref": "#/definitions/env" },
+        "base": { "description": "ecs: the task definition family Terraform owns. Default <name>-base.", "$ref": "#/definitions/text" },
+        "cluster": { "description": "ecs: the cluster name or ARN. Required for ecs.", "$ref": "#/definitions/text" },
+        "container": { "description": "Which container carries the application image. Only needed when there are several and none uses the conventional name.", "$ref": "#/definitions/text" },
+        "command": { "description": "The container's whole command line. Absent keeps the entry point the target has.", "$ref": "#/definitions/texts" },
+        "test_url": { "description": "ecs: where the test listener rule answers. Required for a blue-green ecs target.", "$ref": "#/definitions/text" },
+        "code": { "description": "lambda, function-app: where the deployment package lives.", "$ref": "#/definitions/code" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "ecs" } } },
+          "then": { "properties": { "code": false } }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "lambda" } } },
+          "then": { "properties": { "base": false, "cluster": false, "container": false, "command": false } }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "function-app" } } },
+          "then": { "properties": { "base": false, "cluster": false, "container": false, "command": false, "code": { "properties": { "bucket": false, "key": false } } } }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "cloud-run" } } },
+          "then": { "properties": { "base": false, "cluster": false, "code": false } }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "cloud-run-job" } } },
+          "then": { "properties": { "base": false, "cluster": false, "code": false } }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "container-app" } } },
+          "then": { "properties": { "base": false, "cluster": false, "code": false } }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "container-app-job" } } },
+          "then": { "properties": { "base": false, "cluster": false, "code": false } }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "helm" } } },
+          "then": { "properties": { "base": false, "cluster": false, "container": false, "command": false, "code": false } }
+        }
+      ]
+    },
+
+    "code": {
+      "title": "code",
+      "description": "Where a deployment package lives. {{.version}} is substituted.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bucket": { "description": "lambda: the S3 bucket.", "$ref": "#/definitions/text" },
+        "key": { "description": "lambda: the S3 key, e.g. purchase-{{.version}}.zip.", "$ref": "#/definitions/text" },
+        "url": { "description": "function-app: the full blob URL.", "$ref": "#/definitions/text" }
+      }
+    },
+
+    "hooks": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/hook" }
+    },
+    "hook": {
+      "title": "hook",
+      "description": "A command line, or a block with either `cmd` or `uses`.",
+      "$comment": "A plain value is a command line whatever YAML thinks it is: `- true` is the shell's true, not a boolean.",
+      "type": ["string", "number", "boolean", "object"],
+      "errorMessage": "a hook is either a command line or a block with `cmd` or `uses`",
+      "if": { "type": "object" },
+      "then": { "$ref": "#/definitions/hook-block" }
+    },
+    "hook-block": {
+      "title": "hook",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cmd": { "description": "A command line, the same as writing it as a plain string.", "$ref": "#/definitions/text" },
+        "uses": { "description": "A named action.", "enum": ["honeycomb", "http", "job", "sentry"] },
+        "with": { "description": "The action's options.", "type": "object" }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["uses"], "properties": { "uses": { "const": "honeycomb" } } },
+          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/honeycomb-options" } } }
+        },
+        {
+          "if": { "required": ["uses"], "properties": { "uses": { "const": "http" } } },
+          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/http-options" } } }
+        },
+        {
+          "if": { "required": ["uses"], "properties": { "uses": { "const": "job" } } },
+          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/job-options" } } }
+        },
+        {
+          "if": { "required": ["uses"], "properties": { "uses": { "const": "sentry" } } },
+          "then": { "required": ["with"], "properties": { "with": { "$ref": "#/definitions/sentry-options" } } }
+        }
+      ]
+    },
+
+    "honeycomb-options": {
+      "title": "honeycomb options",
+      "description": "Puts a deploy marker on a Honeycomb dataset.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset"],
+      "properties": {
+        "dataset": { "description": "The dataset to mark; __all__ marks the whole environment.", "$ref": "#/definitions/text" },
+        "message": { "description": "Default {{.name}} {{.version}}.", "$ref": "#/definitions/text" },
+        "type": { "description": "Groups markers so they share a colour. Default deploy.", "$ref": "#/definitions/text" },
+        "url": { "description": "What the marker links to, usually the commit.", "$ref": "#/definitions/text" },
+        "endpoint": { "description": "Default https://api.honeycomb.io.", "$ref": "#/definitions/text" },
+        "key_env": { "description": "Which variable holds the key. Default HONEYCOMB_API_KEY.", "$ref": "#/definitions/text" }
+      }
+    },
+    "http-options": {
+      "title": "http options",
+      "description": "Sends one request and checks the status.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": { "$ref": "#/definitions/text" },
+        "method": { "description": "Default GET.", "$ref": "#/definitions/text" },
+        "headers": { "type": "object", "additionalProperties": { "$ref": "#/definitions/text" } },
+        "body": { "$ref": "#/definitions/text" },
+        "status": { "description": "The one status that counts as healthy. Default any 2xx.", "type": "integer" },
+        "timeout": { "description": "Bounds one attempt. Default 10s.", "$ref": "#/definitions/duration" },
+        "retry": { "description": "Further attempts after the first. Default 0.", "type": "integer" },
+        "delay": { "description": "Between attempts. Default 3s.", "$ref": "#/definitions/duration" }
+      }
+    },
+    "job-options": {
+      "title": "job options",
+      "description": "Runs a job to completion.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "description": "The job, as Terraform named it.", "$ref": "#/definitions/text" },
+        "container": { "description": "Which container, in a job with sidecars.", "$ref": "#/definitions/text" },
+        "version": { "description": "The image tag to run. Default {{.version}}.", "$ref": "#/definitions/text" },
+        "command": { "description": "The whole command line, for this one run.", "$ref": "#/definitions/texts" },
+        "target": { "description": "AWS: the ecs target whose cluster and network the task runs in.", "$ref": "#/definitions/text" },
+        "base": { "description": "AWS: the family Terraform registers the task's shape into. Default <name>-base.", "$ref": "#/definitions/text" },
+        "timeout": { "description": "How long the run may take before it is stopped, e.g. 15m.", "$ref": "#/definitions/duration" }
+      }
+    },
+    "sentry-options": {
+      "title": "sentry options",
+      "description": "Creates a Sentry release and marks it deployed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["org"],
+      "properties": {
+        "org": { "$ref": "#/definitions/text" },
+        "project": { "description": "Default {{.name}}.", "$ref": "#/definitions/text" },
+        "projects": { "description": "Several projects, instead of `project`.", "$ref": "#/definitions/texts" },
+        "version": { "description": "What Sentry calls a release. Default {{.version}}.", "$ref": "#/definitions/text" },
+        "environment": { "description": "Default {{.env}}.", "$ref": "#/definitions/text" },
+        "repository": { "$ref": "#/definitions/text" },
+        "commit": { "$ref": "#/definitions/text" },
+        "endpoint": { "description": "Default https://sentry.io/api/0.", "$ref": "#/definitions/text" },
+        "key_env": { "description": "Default SENTRY_AUTH_TOKEN.", "$ref": "#/definitions/text" }
+      }
+    }
+  }
+}

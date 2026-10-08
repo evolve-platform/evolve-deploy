@@ -12,6 +12,25 @@ strategy:   { ... }   # optional
 services:   { ... }   # required
 ```
 
+## In your editor
+
+The rules on this page are published as a JSON Schema, and the tool checks every
+file against that same schema before it reads it. An editor with YAML support
+can check the file while you type, with completion and a description for every
+key. Put this on the first line:
+
+```yaml
+# yaml-language-server: $schema=https://deploy.evolve-platform.com/schema/latest.json
+```
+
+That works in VS Code with the Red Hat YAML extension, in JetBrains IDEs, and in
+anything else built on `yaml-language-server`.
+
+`latest.json` follows the newest release. A pipeline pinned to an older version
+can pin the schema to match, `schema/v0.13.0.json`, and
+[`evolve-deploy schema`](../cli/#evolve-deploy-schema) prints the one built into
+the binary you have.
+
 ## `cloud`
 
 A tagged union. `provider` selects which fields apply and the rest are rejected.
@@ -146,7 +165,18 @@ as it does in CI.
 ### While reading the config
 
 Parsing is strict — an unknown key is an error — and the whole file is checked at
-once, so one run reports every mistake in it rather than the first:
+once, so one run reports every mistake in it rather than the first. Each one
+names the key it is about and the line it is on, and a misspelt key or value
+says what it was probably meant to be:
+
+```
+deploy/tst.yaml is invalid:
+  - services.site.clsuter: line 11: unknown field (did you mean cluster?)
+  - services.site.depends_on: line 9: want a list, got "purchase"; a list of one is written [purchase]
+  - services.site.targets[0].type: line 13: "cloud-run" is not valid when cloud.provider is aws (want one of ecs, lambda)
+```
+
+What is refused:
 
 - An unknown key, or a field belonging to a different `cloud.provider` than the
   one declared

@@ -101,6 +101,17 @@ whatever else is true of it.
 Deleting a revision cannot be undone. The first sweep of a long-lived service is
 slow: each revision is removed and waited for.
 
+## `evolve-deploy schema`
+
+Print the JSON Schema this version checks a config file against. It is the
+same document a release publishes at
+`https://deploy.evolve-platform.com/schema/v<version>.json`; see
+[In your editor](../config/#in-your-editor).
+
+```console
+$ evolve-deploy schema > deploy/schema.json
+```
+
 ## `evolve-deploy version`
 
 ```console

@@ -26,9 +26,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      # The full history, for its tags: the config schema of every release is
+      # published from the tag that released it (scripts/schemas.mjs), and a
+      # shallow clone would deploy a site with none.
       - name: Check out code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       # Before setup-node, so that its pnpm cache has a pnpm to ask about the
