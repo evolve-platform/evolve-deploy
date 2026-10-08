@@ -76,6 +76,9 @@ func (d *Driver) RunJob(ctx context.Context, j hooks.Job, out io.Writer) (err er
 }
 
 func (d *Driver) prepareJobRun(ctx context.Context, j hooks.Job) (*jobRun, error) {
+	if err := hooks.ErrAWSOnly(j); err != nil {
+		return nil, err
+	}
 	got, err := d.jobs.Get(ctx, d.file.Cloud.ResourceGroup, j.Name, nil)
 	if err != nil {
 		return nil, fmt.Errorf("container app job %s: %w", j.Name, err)

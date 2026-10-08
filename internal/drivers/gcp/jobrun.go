@@ -72,6 +72,9 @@ func (d *Driver) RunJob(ctx context.Context, j hooks.Job, out io.Writer) (err er
 }
 
 func (d *Driver) prepareJobRun(ctx context.Context, j hooks.Job) (*jobRun, error) {
+	if err := hooks.ErrAWSOnly(j); err != nil {
+		return nil, err
+	}
 	job, err := d.getJob(ctx, j.Name)
 	if err != nil {
 		return nil, err

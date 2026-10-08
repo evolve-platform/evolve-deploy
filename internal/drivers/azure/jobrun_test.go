@@ -187,3 +187,13 @@ func TestAHookCommandIsForOneRun(t *testing.T) {
 		t.Errorf("restored image = %q", got)
 	}
 }
+
+func TestTheAWSOptionsAreRefusedOnAzure(t *testing.T) {
+	// A job resource of its own needs neither, and an option that is accepted
+	// and ignored is one somebody believes is doing something.
+	d := (&jobArm{image: "acr.io/wagtail:old"}).driver(t)
+	err := d.CheckJob(context.Background(), hooks.Job{Name: "migrate", Version: "v2", Base: "migrate-base"})
+	if err == nil || !strings.Contains(err.Error(), "only exists on aws") {
+		t.Errorf("error was %v", err)
+	}
+}

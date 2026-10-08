@@ -127,7 +127,7 @@ point of it.
 ## `uses: job`
 
 Runs a job once on the version being released and waits for it to finish — a
-Container Apps job on Azure, a Cloud Run job on GCP.
+Container Apps job on Azure, a Cloud Run job on GCP, a one-off ECS task on AWS.
 
 ```yaml
 services:
@@ -149,6 +149,8 @@ services:
 | `command` | the whole command line, for this one run | the job's own |
 | `container` | which container, in a job with sidecars | as for a target |
 | `version` | the image tag to run | `{{.version}}` |
+| `base` | AWS: the family Terraform registers the task's shape into | `<name>-base` |
+| `target` | AWS: the ecs target whose cluster and network the task runs in | the service's own |
 
 **The image is written onto the job before it runs.** A migration has to run
 against what is about to go out, not what is serving — and on Cloud Run an
@@ -161,10 +163,42 @@ not. Without one the job runs what it was declared with.
 
 **The job is Terraform's.** Its environment, secrets, identity and timeout are
 left alone, and a job that does not exist is refused while planning rather than
-created. So is `uses: job` on AWS, which has no jobs a hook can run.
+created.
 
 There is no timeout of the tool's own: the job's is the one that counts, and the
 platform fails the execution when it passes.
+
+### On AWS
+
+ECS has no job resource, so a job there is a task definition family and a
+`RunTask` — what `before_deploy` was in ecs-deplojo:
+
+```yaml
+before:
+  - uses: job
+    with:
+      name: ask-migrate
+      container: uwsgi
+      command: [python, manage.py, migrate, --noinput]
+```
+
+- **The shape is Terraform's**, registered into `ask-migrate-base` the same way
+  as for an [ecs target](../../infrastructure/terraform/). Each run registers a
+  revision of `ask-migrate` from it with the release's image and, if given, the
+  command — RunTask can override neither — so there is nothing to put back.
+  Applied twice, the revision that is already there is reused.
+- **The network is the service's.** The task starts in the cluster, subnets,
+  security groups and launch type or capacity providers of the service's own
+  ecs target, which is the network that already reaches the database. A service
+  with none or several, and a job in `strategy.smoke`, names one with `target`.
+- **The verdict is the exit code** of the container that ran, not ECS's
+  stopped reason, which is the same for a pass and a failure. A failure says
+  where the awslogs stream is.
+- **ECS has no task timeout**, so a migration that hangs waits until the
+  pipeline gives up.
+
+`base` and `target` are refused on Azure and GCP, where the job is a resource of
+its own and needs neither.
 
 In `before` a failed run calls the release off like any other hook. In `after`
 it is reported and rolls nothing back. A successful run prints nothing; a

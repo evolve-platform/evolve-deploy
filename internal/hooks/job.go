@@ -42,6 +42,17 @@ type Job struct {
 	// Command replaces the job's entry point for this one run. Empty runs
 	// whatever the job was declared with.
 	Command []string
+
+	// Service is the service whose hook this is, empty in a release-wide
+	// smoke test. Only AWS reads it: ECS has no job resource, so a run needs a
+	// cluster and a network to start in, and those are the service's.
+	Service string
+	// Target names the ECS target to take the cluster and network from, where
+	// the service has none or several. AWS only.
+	Target string
+	// Base is the task definition family Terraform registers the job's shape
+	// into, <Name>-base unless set. AWS only.
+	Base string
 }
 
 type jobOptions struct {
@@ -49,10 +60,12 @@ type jobOptions struct {
 	Container string   `yaml:"container"`
 	Version   string   `yaml:"version"`
 	Command   []string `yaml:"command"`
+	Target    string   `yaml:"target"`
+	Base      string   `yaml:"base"`
 }
 
-// jobAction runs a Container Apps job or a Cloud Run job — a migration before a
-// release, a permissions load after it.
+// jobAction runs a Container Apps job, a Cloud Run job or a one-off ECS task — a
+// migration before a release, a permissions load after it.
 //
 // Not a command line, because the command line for this is several calls with a
 // poll in the middle — start the execution, read its status until it stops
@@ -92,7 +105,7 @@ func (a jobAction) Describe() string {
 func (a jobAction) Render(data any, funcs template.FuncMap) (Step, error) {
 	b := a
 	b.o.Command = slices.Clone(a.o.Command)
-	fields := []*string{&b.o.Name, &b.o.Container, &b.o.Version}
+	fields := []*string{&b.o.Name, &b.o.Container, &b.o.Version, &b.o.Target, &b.o.Base}
 	for i := range b.o.Command {
 		fields = append(fields, &b.o.Command[i])
 	}
@@ -104,36 +117,63 @@ func (a jobAction) Render(data any, funcs template.FuncMap) (Step, error) {
 		// which the registry refuses only after the job has been rewritten.
 		return Step{}, errors.New("job: `version` rendered to nothing")
 	}
-	return Step{line: b.Describe(), run: b.run, probe: b.probe}, nil
+	// The service is read from the variables rather than taken as an option:
+	// it is always the hook's own, and a smoke test, which belongs to no
+	// service, has no {{.name}} to give.
+	var service string
+	if m, ok := data.(map[string]any); ok {
+		service, _ = m["name"].(string)
+	}
+	return Step{line: b.Describe(), run: b.run(service), probe: b.probe(service)}, nil
 }
 
-func (a jobAction) job() Job {
+func (a jobAction) job(service string) Job {
 	return Job{
 		Name:      a.o.Name,
 		Container: a.o.Container,
 		Version:   a.o.Version,
 		Command:   a.o.Command,
+		Service:   service,
+		Target:    a.o.Target,
+		Base:      a.o.Base,
 	}
 }
 
-func (a jobAction) probe(ctx context.Context, e *Exec) error {
-	if e.Jobs == nil {
-		return errNoJobs
+func (a jobAction) probe(service string) func(context.Context, *Exec) error {
+	return func(ctx context.Context, e *Exec) error {
+		if e.Jobs == nil {
+			return errNoJobs
+		}
+		if err := e.Jobs.CheckJob(ctx, a.job(service)); err != nil {
+			return fmt.Errorf("job: %w", err)
+		}
+		return nil
 	}
-	if err := e.Jobs.CheckJob(ctx, a.job()); err != nil {
-		return fmt.Errorf("job: %w", err)
+}
+
+func (a jobAction) run(service string) func(context.Context, *Exec) error {
+	return func(ctx context.Context, e *Exec) error {
+		if e.Jobs == nil {
+			// Probed while planning, so unreachable from the CLI. A job that
+			// silently does not run is a migration that silently did not
+			// happen.
+			return errNoJobs
+		}
+		return e.Jobs.RunJob(ctx, a.job(service), e.Out)
+	}
+}
+
+var errNoJobs = errors.New("job: this cloud has no jobs a hook can run")
+
+// ErrAWSOnly is what a driver with a job resource of its own says to `base` or
+// `target`, which only describe how AWS makes up for not having one.
+func ErrAWSOnly(j Job) error {
+	switch {
+	case j.Base != "":
+		return errors.New("`base` names a task definition family, which only exists on aws")
+	case j.Target != "":
+		return errors.New("`target` names an ECS service to borrow a network from, " +
+			"which only means something on aws")
 	}
 	return nil
 }
-
-func (a jobAction) run(ctx context.Context, e *Exec) error {
-	if e.Jobs == nil {
-		// Probed while planning, so unreachable from the CLI. A job that
-		// silently does not run is a migration that silently did not happen.
-		return errNoJobs
-	}
-	return e.Jobs.RunJob(ctx, a.job(), e.Out)
-}
-
-var errNoJobs = errors.New("job: this cloud has no jobs a hook can run " +
-	"— `uses: job` works on azure and gcp")
