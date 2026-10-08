@@ -15,7 +15,7 @@ import (
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
 
-// jobRun is what a `uses: job` writes, worked out from one read of the job.
+// jobRun is what a `cloud-run-job` hook writes, worked out from one read of the job.
 type jobRun struct {
 	// run is the job the execution starts from: the release's image, and the
 	// hook's command where it gave one.
@@ -73,9 +73,6 @@ func (d *Driver) RunJob(ctx context.Context, j hooks.Job, out io.Writer) (err er
 }
 
 func (d *Driver) prepareJobRun(ctx context.Context, j hooks.Job) (*jobRun, error) {
-	if err := hooks.ErrAWSOnly(j); err != nil {
-		return nil, err
-	}
 	job, err := d.getJob(ctx, j.Name)
 	if err != nil {
 		return nil, err

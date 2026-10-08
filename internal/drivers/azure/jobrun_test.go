@@ -20,7 +20,7 @@ import (
 	"github.com/evolve-platform/evolve-deploy/internal/hooks"
 )
 
-// jobArm answers the reads and writes of a `uses: job` and records the writes.
+// jobArm answers the reads and writes of a `container-app-job` hook and records the writes.
 type jobArm struct {
 	image   string
 	command []string
@@ -193,16 +193,6 @@ func TestAHookCommandIsForOneRun(t *testing.T) {
 	// The image stays on the release: it is the command that was for one run.
 	if got := *restore.Image; got != "acr.io/wagtail:v2" {
 		t.Errorf("restored image = %q", got)
-	}
-}
-
-func TestTheAWSOptionsAreRefusedOnAzure(t *testing.T) {
-	// A job resource of its own needs neither, and an option that is accepted
-	// and ignored is one somebody believes is doing something.
-	d := (&jobArm{image: "acr.io/wagtail:old"}).driver(t)
-	err := d.CheckJob(context.Background(), hooks.Job{Name: "migrate", Version: "v2", Base: "migrate-base"})
-	if err == nil || !strings.Contains(err.Error(), "only exists on aws") {
-		t.Errorf("error was %v", err)
 	}
 }
 

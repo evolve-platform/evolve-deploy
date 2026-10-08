@@ -209,7 +209,7 @@ func TestValidation(t *testing.T) {
       - echo fine
       - {uses: honycomb, with: {dataset: site}}
 `,
-			want: `services.site.after[1].uses: line 13: "honycomb" is not one of honeycomb, http, job, sentry`,
+			want: `services.site.after[1].uses: line 13: "honycomb" is not one of cloud-run-job, container-app-job, ecs-task, honeycomb, http, sentry`,
 		},
 		{
 			name: "an option the action does not have",

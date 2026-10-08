@@ -14,13 +14,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Jobs is what a cloud offers a `uses: job`: a job that already exists, run once
-// on a version and waited for.
+// Jobs is what a cloud offers a `uses: container-app-job`, `cloud-run-job` or
+// `ecs-task`: a job that already exists, run once on a version and waited for.
 //
 // Declared here rather than in package target because this is the package that
 // needs it, and target cannot be imported from here without a cycle. A driver
 // implements it or does not; one that does not is refused at plan time.
 type Jobs interface {
+	// Name is the cloud, which decides which of the three names is the right
+	// one. Every driver already has it.
+	Name() string
+
 	// CheckJob reads the job and reports whether RunJob could run it, without
 	// writing anything. A job Terraform never created is the case it exists
 	// for: that belongs in the plan, not in an `after` hook on a release that
@@ -61,14 +65,37 @@ type Job struct {
 	Timeout time.Duration
 }
 
+// jobOptions are what `container-app-job` and `cloud-run-job` take.
 type jobOptions struct {
 	Name      string   `yaml:"name"`
 	Container string   `yaml:"container"`
 	Version   string   `yaml:"version"`
 	Command   []string `yaml:"command"`
-	Target    string   `yaml:"target"`
-	Base      string   `yaml:"base"`
 	Timeout   string   `yaml:"timeout"`
+}
+
+// ecsTaskOptions are jobOptions and the two things AWS needs to make up for
+// having no job resource. A type of their own rather than two fields the other
+// names refuse by hand, so that the schema and the decoder refuse them in the
+// same words as any other option nobody has.
+type ecsTaskOptions struct {
+	jobOptions `yaml:",inline"`
+
+	Target string `yaml:"target"`
+	Base   string `yaml:"base"`
+}
+
+// jobClouds are the names a job goes by, and the cloud each one is.
+//
+// Three names for one action, because a deploy file already speaks its cloud's
+// language: its targets are `container-app` or `cloud-run` or `ecs`, and a hook
+// that runs the same resource as a `container-app-job` target is clearest
+// called that. A neutral name would buy portability between clouds, which a
+// deploy file never has.
+var jobClouds = map[string]string{
+	"container-app-job": "azure",
+	"cloud-run-job":     "gcp",
+	"ecs-task":          "aws",
 }
 
 // jobAction runs a Container Apps job, a Cloud Run job or a one-off ECS task — a
@@ -84,17 +111,33 @@ type jobOptions struct {
 // timeout. This changes the image and, for one run, the command, and never
 // creates one that is not there.
 type jobAction struct {
-	o       jobOptions
+	// uses is the name it was written as, which every message repeats back.
+	uses    string
+	o       ecsTaskOptions
 	timeout time.Duration
 }
 
-func parseJob(with *yaml.Node) (Action, error) {
-	var o jobOptions
-	if err := decode(with, &o); err != nil {
+func parseJob(uses string) func(*yaml.Node) (Action, error) {
+	return func(with *yaml.Node) (Action, error) {
+		a, err := parseJobAs(uses, with)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", uses, err)
+		}
+		return a, nil
+	}
+}
+
+func parseJobAs(uses string, with *yaml.Node) (Action, error) {
+	var o ecsTaskOptions
+	into := any(&o)
+	if uses != "ecs-task" {
+		into = &o.jobOptions
+	}
+	if err := decode(with, into); err != nil {
 		return nil, err
 	}
 	if o.Name == "" {
-		return nil, errors.New("job: `name` is required")
+		return nil, errors.New("`name` is required")
 	}
 	// Parsed now rather than at the run, so a typo is a config error and not
 	// a failed `after` hook.
@@ -103,17 +146,17 @@ func parseJob(with *yaml.Node) (Action, error) {
 		var err error
 		timeout, err = time.ParseDuration(o.Timeout)
 		if err != nil || timeout <= 0 {
-			return nil, fmt.Errorf("job: timeout: %q is not a duration (try 10m or 1h)", o.Timeout)
+			return nil, fmt.Errorf("timeout: %q is not a duration (try 10m or 1h)", o.Timeout)
 		}
 	}
 	// The release's own version, because that is the point: a migration run
 	// against the image that is about to go out, not the one already serving.
 	o.Version = cmp.Or(o.Version, "{{.version}}")
-	return jobAction{o: o, timeout: timeout}, nil
+	return jobAction{uses: uses, o: o, timeout: timeout}, nil
 }
 
 func (a jobAction) Describe() string {
-	line := fmt.Sprintf("job %s on %s", a.o.Name, a.o.Version)
+	line := fmt.Sprintf("%s %s on %s", a.uses, a.o.Name, a.o.Version)
 	if len(a.o.Command) > 0 {
 		line += ": " + strings.Join(a.o.Command, " ")
 	}
@@ -136,7 +179,7 @@ func (a jobAction) Render(data any, funcs template.FuncMap) (Step, error) {
 	if b.o.Version == "" {
 		// A version that rendered to nothing would retag the image to `name:`,
 		// which the registry refuses only after the job has been rewritten.
-		return Step{}, errors.New("job: `version` rendered to nothing")
+		return Step{}, fmt.Errorf("%s: `version` rendered to nothing", a.uses)
 	}
 	// The service is read from the variables rather than taken as an option:
 	// it is always the hook's own, and a smoke test, which belongs to no
@@ -163,11 +206,11 @@ func (a jobAction) job(service string) Job {
 
 func (a jobAction) probe(service string) func(context.Context, *Exec) error {
 	return func(ctx context.Context, e *Exec) error {
-		if e.Jobs == nil {
-			return errNoJobs
+		if err := a.onItsCloud(e.Jobs); err != nil {
+			return err
 		}
 		if err := e.Jobs.CheckJob(ctx, a.job(service)); err != nil {
-			return fmt.Errorf("job: %w", err)
+			return fmt.Errorf("%s: %w", a.uses, err)
 		}
 		return nil
 	}
@@ -175,27 +218,29 @@ func (a jobAction) probe(service string) func(context.Context, *Exec) error {
 
 func (a jobAction) run(service string) func(context.Context, *Exec) error {
 	return func(ctx context.Context, e *Exec) error {
-		if e.Jobs == nil {
-			// Probed while planning, so unreachable from the CLI. A job that
-			// silently does not run is a migration that silently did not
-			// happen.
-			return errNoJobs
+		// Probed while planning, so unreachable from the CLI. A job that
+		// silently does not run is a migration that silently did not happen.
+		if err := a.onItsCloud(e.Jobs); err != nil {
+			return err
 		}
 		return e.Jobs.RunJob(ctx, a.job(service), e.Out)
 	}
 }
 
-var errNoJobs = errors.New("job: this cloud has no jobs a hook can run")
-
-// ErrAWSOnly is what a driver with a job resource of its own says to `base` or
-// `target`, which only describe how AWS makes up for not having one.
-func ErrAWSOnly(j Job) error {
-	switch {
-	case j.Base != "":
-		return errors.New("`base` names a task definition family, which only exists on aws")
-	case j.Target != "":
-		return errors.New("`target` names an ECS service to borrow a network from, " +
-			"which only means something on aws")
+// onItsCloud refuses a name written for another cloud, and says which one this
+// cloud uses.
+func (a jobAction) onItsCloud(jobs Jobs) error {
+	if jobs == nil {
+		return fmt.Errorf("%s: this cloud has no jobs a hook can run", a.uses)
+	}
+	if want := jobClouds[a.uses]; jobs.Name() != want {
+		for uses, cloud := range jobClouds {
+			if cloud == jobs.Name() {
+				return fmt.Errorf("%s is %s's; on %s this is `uses: %s`",
+					a.uses, want, cloud, uses)
+			}
+		}
+		return fmt.Errorf("%s is %s's, and this is %s", a.uses, want, jobs.Name())
 	}
 	return nil
 }

@@ -80,7 +80,18 @@ func TestEveryMistakeIsNamedWhereItIs(t *testing.T) {
 		{
 			name: "an unknown action suggests the one meant",
 			body: awsHeader + "services:\n  site:\n    version: a\n    type: ecs\n    after:\n      - {uses: honycomb}\n",
-			want: `services.site.after[0].uses: line 10: "honycomb" is not one of honeycomb, http, job, sentry (did you mean honeycomb?)`,
+			want: `services.site.after[0].uses: line 10: "honycomb" is not one of cloud-run-job, container-app-job, ecs-task, honeycomb, http, sentry (did you mean honeycomb?)`,
+		},
+		{
+			// Renamed after v0.13.0, so the old name is the likeliest mistake.
+			name: "the job action before it was named after its cloud",
+			body: awsHeader + "services:\n  site:\n    version: a\n    type: ecs\n    after:\n      - {uses: job, with: {name: m}}\n",
+			want: `services.site.after[0].uses: line 10: "job" is not one of cloud-run-job, container-app-job, ecs-task, honeycomb, http, sentry`,
+		},
+		{
+			name: "an option only an ecs-task has",
+			body: awsHeader + "services:\n  site:\n    version: a\n    type: ecs\n    after:\n      - {uses: container-app-job, with: {name: m, base: m-base}}\n",
+			want: "services.site.after[0].with.base: line 10: unknown option (want one of command, container, name, timeout, version)",
 		},
 		{
 			name: "an action's options are called options",

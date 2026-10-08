@@ -15,10 +15,12 @@ import (
 // because the plugin table holds parsers, not types; the first check below is
 // what stops it falling behind that table.
 var options = map[string]any{
-	"honeycomb": honeycombOptions{},
-	"http":      httpOptions{},
-	"job":       jobOptions{},
-	"sentry":    sentryOptions{},
+	"cloud-run-job":     jobOptions{},
+	"container-app-job": jobOptions{},
+	"ecs-task":          ecsTaskOptions{},
+	"honeycomb":         honeycombOptions{},
+	"http":              httpOptions{},
+	"sentry":            sentryOptions{},
 }
 
 // The schema refuses a `uses` or an option before the parser ever sees it, so
@@ -64,7 +66,11 @@ func fields(v any) []string {
 	var out []string
 	typ := reflect.TypeOf(v)
 	for i := range typ.NumField() {
-		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("yaml"), ",")
+		name, flags, _ := strings.Cut(typ.Field(i).Tag.Get("yaml"), ",")
+		if flags == "inline" {
+			out = append(out, fields(reflect.New(typ.Field(i).Type).Elem().Interface())...)
+			continue
+		}
 		if name != "" && name != "-" {
 			out = append(out, name)
 		}
