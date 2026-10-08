@@ -36,7 +36,7 @@ type Driver struct {
 	jobs      *run.JobsClient
 	secrets   *secretmanager.Client
 
-	// executions only cancels: a `uses: job` run that outlived its timeout.
+	// executions only cancels: a job hook's run that outlived its timeout.
 	executions *run.ExecutionsClient
 }
 

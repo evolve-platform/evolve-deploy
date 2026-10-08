@@ -54,7 +54,7 @@ type Driver struct {
 	revisions *armappcontainers.ContainerAppsRevisionsClient
 	replicas  *armappcontainers.ContainerAppsRevisionReplicasClient
 
-	// executions reads one run of a job, for a `uses: job` waiting on it.
+	// executions reads one run of a job, for a job hook waiting on it.
 	executions *armappcontainers.ContainerAppsAPIClient
 
 	// cred is kept because the function-app driver talks to the SCM site over

@@ -20,6 +20,8 @@ type fakeJobs struct {
 	fail error
 }
 
+func (f *fakeJobs) Name() string { return "azure" }
+
 func (f *fakeJobs) CheckJob(context.Context, Job) error { return nil }
 
 func (f *fakeJobs) RunJob(_ context.Context, j Job, out io.Writer) error {
@@ -39,11 +41,15 @@ func jobHook(t *testing.T, doc string) *Hook {
 
 func TestAJobNeedsAName(t *testing.T) {
 	for doc, want := range map[string]string{
-		`{uses: job}`:                       "`name` is required",
-		`{uses: job, with: {nam: migrate}}`: "no such option: nam",
-		`{uses: job, with: {name: migrate, command: "manage migrate"}}`: "cannot unmarshal",
-		`{uses: job, with: {name: migrate, timeout: 10}}`:               "is not a duration",
-		`{uses: job, with: {name: migrate, timeout: -5m}}`:              "is not a duration",
+		`{uses: container-app-job}`:                                                   "`name` is required",
+		`{uses: container-app-job, with: {nam: migrate}}`:                             "no such option: nam",
+		`{uses: container-app-job, with: {name: migrate, command: "manage migrate"}}`: "cannot unmarshal",
+		`{uses: container-app-job, with: {name: migrate, timeout: 10}}`:               "is not a duration",
+		`{uses: container-app-job, with: {name: migrate, timeout: -5m}}`:              "is not a duration",
+		// What AWS needs to make up for having no job resource, and nothing
+		// else does.
+		`{uses: cloud-run-job, with: {name: migrate, base: migrate-base}}`:  "only an ecs-task has",
+		`{uses: container-app-job, with: {name: migrate, target: ask-web}}`: "a job has a network of its own",
 	} {
 		_, err := jobHook(t, doc).Action()
 		if err == nil || !strings.Contains(err.Error(), want) {
@@ -57,7 +63,7 @@ func TestAJobRunsOnTheVersionBeingReleased(t *testing.T) {
 	var out bytes.Buffer
 	r := &Runner{Out: &out, Jobs: jobs}
 
-	h := jobHook(t, `{uses: job, with: {name: "suz-{{.env}}-migrate", command: [manage, migrate], timeout: 10m}}`)
+	h := jobHook(t, `{uses: container-app-job, with: {name: "suz-{{.env}}-migrate", command: [manage, migrate], timeout: 10m}}`)
 	if err := r.Run(context.Background(), "wagtail", "before", []*Hook{h}, deploy()); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +98,7 @@ func TestAFailedJobPrintsWhatItSaid(t *testing.T) {
 	r := &Runner{Out: &out, Jobs: jobs}
 
 	err := r.Run(context.Background(), "wagtail", "before",
-		[]*Hook{jobHook(t, `{uses: job, with: {name: migrate}}`)}, deploy())
+		[]*Hook{jobHook(t, `{uses: container-app-job, with: {name: migrate}}`)}, deploy())
 	if err == nil {
 		t.Fatal("a failed job did not fail the hook")
 	}
@@ -102,9 +108,9 @@ func TestAFailedJobPrintsWhatItSaid(t *testing.T) {
 }
 
 func TestAJobOnACloudWithoutJobsIsRefusedByTheProbe(t *testing.T) {
-	h := jobHook(t, `{uses: job, with: {name: migrate}}`)
+	h := jobHook(t, `{uses: container-app-job, with: {name: migrate}}`)
 	err := Probe(context.Background(), []*Hook{h}, deploy().Data(), nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "has no jobs a hook can run") {
+	if err == nil || !strings.Contains(err.Error(), "container-app-job: this cloud has no jobs a hook can run") {
 		t.Errorf("error was %v", err)
 	}
 
@@ -112,5 +118,13 @@ func TestAJobOnACloudWithoutJobsIsRefusedByTheProbe(t *testing.T) {
 	// on one that has no jobs.
 	if err := Probe(context.Background(), []*Hook{Command("true")}, deploy().Data(), nil, nil); err != nil {
 		t.Errorf("a command was refused: %v", err)
+	}
+}
+
+func TestAJobNamedForAnotherCloudIsRefused(t *testing.T) {
+	h := jobHook(t, `{uses: cloud-run-job, with: {name: migrate}}`)
+	err := Probe(context.Background(), []*Hook{h}, deploy().Data(), nil, &fakeJobs{})
+	if err == nil || !strings.Contains(err.Error(), "cloud-run-job is gcp's; on azure this is `uses: container-app-job`") {
+		t.Errorf("error was %v", err)
 	}
 }

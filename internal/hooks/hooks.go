@@ -50,7 +50,7 @@ type Runner struct {
 	// everything it printed, because that output is the diagnosis.
 	Verbose bool
 
-	// Jobs is the cloud a `uses: job` runs on. Nil where the driver has no
+	// Jobs is the cloud a job hook runs on. Nil where the driver has no
 	// jobs, which the plan has already refused.
 	Jobs Jobs
 
@@ -255,7 +255,7 @@ func ValidateWith(hooks []*Hook, data any, funcs template.FuncMap) error {
 // validation does not: smoke commands are checked against urls that do not
 // exist yet and need nothing but the file. A job is different — whether it is
 // there is a fact about the cloud, and one that must not first be learnt from
-// an `after` hook. jobs is nil on a cloud that has none, and a `uses: job` there
+// an `after` hook. jobs is nil on a cloud that has none, and a job hook there
 // is refused here.
 func Probe(ctx context.Context, hooks []*Hook, data any, funcs template.FuncMap, jobs Jobs) error {
 	for _, hook := range hooks {
