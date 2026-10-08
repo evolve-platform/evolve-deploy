@@ -83,20 +83,27 @@ func (d *Driver) RunJob(ctx context.Context, j hooks.Job, out io.Writer) error {
 	task := awssdk.ToString(started.Tasks[0].TaskArn)
 	fmt.Fprintf(out, "started task %s from %s\n", taskID(task), taskID(arn))
 
-	return d.waitTask(ctx, j.Name, plan, task, out)
+	return d.waitTask(ctx, j.Name, plan, task, j.Timeout, out)
 }
 
 // waitTask reads the task until it stops and judges it by the container that
 // was asked to run.
 //
-// There is no deadline here, and ECS keeps none for a task either: a migration
-// that hangs hangs until the pipeline gives up. A number of the tool's own
-// would be a guess at how long someone else's migration takes, and a wrong one
-// walks away from one that is still running.
-func (d *Driver) waitTask(ctx context.Context, name string, plan *jobRun, task string, out io.Writer) error {
+// ECS keeps no deadline for a task, so the hook's timeout is the only one there
+// is: without it a migration that hangs hangs until the pipeline gives up. When
+// it passes the task is stopped rather than walked away from, because a
+// migration still running while the release goes ahead is what it is there to
+// prevent.
+func (d *Driver) waitTask(
+	ctx context.Context, name string, plan *jobRun, task string, timeout time.Duration, out io.Writer,
+) error {
 	timer := logging.Start("wait for task", "task", task)
 	begun := time.Now()
 	logs := taskLogs(plan.register, plan.container, taskID(task), d.file.Cloud.Region)
+	var expired <-chan time.Time
+	if timeout > 0 {
+		expired = time.After(timeout)
+	}
 
 	for {
 		got, err := d.ecs.DescribeTasks(ctx, &ecs.DescribeTasksInput{
@@ -121,6 +128,19 @@ func (d *Driver) waitTask(ctx context.Context, name string, plan *jobRun, task s
 		case <-ctx.Done():
 			return fmt.Errorf("task %s: gave up waiting for %s, which may still be running: %w",
 				name, taskID(task), ctx.Err())
+		case <-expired:
+			late := fmt.Errorf("task %s (%s) ran longer than its timeout of %s",
+				name, taskID(task), timeout)
+			// Not the caller's context: it is about to be the reason nobody
+			// stops it.
+			if _, err := d.ecs.StopTask(context.WithoutCancel(ctx), &ecs.StopTaskInput{
+				Cluster: plan.run.Cluster,
+				Task:    awssdk.String(task),
+				Reason:  awssdk.String(fmt.Sprintf("evolve-deploy: ran longer than %s", timeout)),
+			}); err != nil {
+				return fmt.Errorf("%w, and stopping it failed, so it may still be running: %w", late, err)
+			}
+			return fmt.Errorf("%w and was stopped%s", late, logs)
 		case <-time.After(taskPoll):
 		}
 	}

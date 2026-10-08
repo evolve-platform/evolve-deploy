@@ -30,6 +30,7 @@ type jobArm struct {
 	patches [][]*armappcontainers.Container
 	started int
 	reads   int
+	stopped []string
 }
 
 func (a *jobArm) driver(t *testing.T) *Driver {
@@ -57,6 +58,13 @@ func (a *jobArm) driver(t *testing.T) *Driver {
 			) (resp azfake.PollerResponder[armappcontainers.JobsClientUpdateResponse], errResp azfake.ErrorResponder) {
 				a.patches = append(a.patches, patch.Properties.Template.Containers)
 				resp.SetTerminalResponse(http.StatusOK, armappcontainers.JobsClientUpdateResponse{}, nil)
+				return
+			},
+			BeginStopExecution: func(
+				_ context.Context, _, _, exec string, _ *armappcontainers.JobsClientBeginStopExecutionOptions,
+			) (resp azfake.PollerResponder[armappcontainers.JobsClientStopExecutionResponse], errResp azfake.ErrorResponder) {
+				a.stopped = append(a.stopped, exec)
+				resp.SetTerminalResponse(http.StatusOK, armappcontainers.JobsClientStopExecutionResponse{}, nil)
 				return
 			},
 			BeginStart: func(
@@ -195,5 +203,23 @@ func TestTheAWSOptionsAreRefusedOnAzure(t *testing.T) {
 	err := d.CheckJob(context.Background(), hooks.Job{Name: "migrate", Version: "v2", Base: "migrate-base"})
 	if err == nil || !strings.Contains(err.Error(), "only exists on aws") {
 		t.Errorf("error was %v", err)
+	}
+}
+
+func TestARunPastItsTimeoutIsStopped(t *testing.T) {
+	// Walking away would leave a migration running under a release that has
+	// gone ahead without it, which is what the timeout is there to prevent.
+	cloud := &jobArm{
+		image:    "acr.io/wagtail:v2",
+		statuses: []armappcontainers.JobExecutionRunningState{armappcontainers.JobExecutionRunningStateRunning},
+	}
+	err := cloud.driver(t).RunJob(context.Background(), hooks.Job{
+		Name: "migrate", Version: "v2", Timeout: 20 * time.Millisecond,
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "ran longer than its timeout of 20ms and was stopped") {
+		t.Fatalf("error was %v", err)
+	}
+	if len(cloud.stopped) != 1 || cloud.stopped[0] != "migrate-x1" {
+		t.Errorf("stopped %v, want migrate-x1", cloud.stopped)
 	}
 }

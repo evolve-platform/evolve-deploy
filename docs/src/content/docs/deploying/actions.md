@@ -149,6 +149,7 @@ services:
 | `command` | the whole command line, for this one run | the job's own |
 | `container` | which container, in a job with sidecars | as for a target |
 | `version` | the image tag to run | `{{.version}}` |
+| `timeout` | how long the run may take before it is stopped, e.g. `15m` | none |
 | `base` | AWS: the family Terraform registers the task's shape into | `<name>-base` |
 | `target` | AWS: the ecs target whose cluster and network the task runs in | the service's own |
 
@@ -165,8 +166,11 @@ not. Without one the job runs what it was declared with.
 left alone, and a job that does not exist is refused while planning rather than
 created.
 
-There is no timeout of the tool's own: the job's is the one that counts, and the
-platform fails the execution when it passes.
+**A `timeout` stops the run.** Past it the execution is stopped — not walked
+away from, since a migration still running while the release goes ahead is what
+the timeout is there to prevent — and the hook fails. Without one the job's own
+timeout is the only one: Container Apps and Cloud Run fail an execution when it
+passes.
 
 ### On AWS
 
@@ -194,8 +198,8 @@ before:
 - **The verdict is the exit code** of the container that ran, not ECS's
   stopped reason, which is the same for a pass and a failure. A failure says
   where the awslogs stream is.
-- **ECS has no task timeout**, so a migration that hangs waits until the
-  pipeline gives up.
+- **ECS has no task timeout**, so on AWS `timeout` is the only one there is.
+  Without it a migration that hangs waits until the pipeline gives up.
 
 `base` and `target` are refused on Azure and GCP, where the job is a resource of
 its own and needs neither.

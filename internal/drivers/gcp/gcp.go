@@ -35,6 +35,9 @@ type Driver struct {
 	revisions *run.RevisionsClient
 	jobs      *run.JobsClient
 	secrets   *secretmanager.Client
+
+	// executions only cancels: a `uses: job` run that outlived its timeout.
+	executions *run.ExecutionsClient
 }
 
 // New builds a driver from application default credentials — in CI the token
@@ -59,12 +62,18 @@ func New(ctx context.Context, f *config.File) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
+	executions, err := run.NewExecutionsClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcp: %w", err)
+	}
 	return &Driver{
 		file:      f,
 		services:  services,
 		revisions: revisions,
 		jobs:      jobs,
 		secrets:   secrets,
+
+		executions: executions,
 	}, nil
 }
 

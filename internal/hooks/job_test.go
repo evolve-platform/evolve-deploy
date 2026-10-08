@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -41,6 +42,8 @@ func TestAJobNeedsAName(t *testing.T) {
 		`{uses: job}`:                       "`name` is required",
 		`{uses: job, with: {nam: migrate}}`: "no such option: nam",
 		`{uses: job, with: {name: migrate, command: "manage migrate"}}`: "cannot unmarshal",
+		`{uses: job, with: {name: migrate, timeout: 10}}`:               "is not a duration",
+		`{uses: job, with: {name: migrate, timeout: -5m}}`:              "is not a duration",
 	} {
 		_, err := jobHook(t, doc).Action()
 		if err == nil || !strings.Contains(err.Error(), want) {
@@ -54,7 +57,7 @@ func TestAJobRunsOnTheVersionBeingReleased(t *testing.T) {
 	var out bytes.Buffer
 	r := &Runner{Out: &out, Jobs: jobs}
 
-	h := jobHook(t, `{uses: job, with: {name: "suz-{{.env}}-migrate", command: [manage, migrate]}}`)
+	h := jobHook(t, `{uses: job, with: {name: "suz-{{.env}}-migrate", command: [manage, migrate], timeout: 10m}}`)
 	if err := r.Run(context.Background(), "wagtail", "before", []*Hook{h}, deploy()); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +68,9 @@ func TestAJobRunsOnTheVersionBeingReleased(t *testing.T) {
 	j := jobs.ran[0]
 	if j.Name != "suz-tst-migrate" || j.Version != "abc1234" {
 		t.Errorf("ran %+v", j)
+	}
+	if j.Timeout != 10*time.Minute {
+		t.Errorf("timeout = %s", j.Timeout)
 	}
 	// The hook's own service, which is where AWS finds a network to run in.
 	if j.Service != "purchase" {
