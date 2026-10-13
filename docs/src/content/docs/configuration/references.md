@@ -73,7 +73,10 @@ env:
 ```
 
 **On GCP** it is a Secret Manager secret name, resolved by Cloud Run itself
-through `secretKeyRef`.
+through `secretKeyRef`. During planning, evolve-deploy resolves the selected
+secret version to its numeric ID using metadata only. An omitted version means
+`latest` at deployment time. Use `${secret:NAME/versions/7}` for a specific version;
+old revisions keep their numeric pins when instances restart.
 
 ## `${env}` in a reference
 
@@ -99,6 +102,41 @@ environment. See [Templating](../templating/).
 
 On Azure the `app_config` URL is only needed if a `${param:...}` reference is
 actually used. A config with none does not need it.
+
+## Parameter Manager snapshots on GCP
+
+```yaml
+env:
+  PARAMETER_MANAGER_PROJECT: my-project
+  PARAMETER_MANAGER_PARAMETER: purchase
+  PARAMETER_MANAGER_VERSION: ${parameter-version:purchase}
+```
+
+`${parameter-version:NAME}` resolves Parameter Manager's `latest` selector once
+per plan and writes the concrete version ID as a literal. The same selector is
+shared across targets, including jobs. Each new plan resolves it again. A missing
+or disabled selected version fails planning. Explicit pins use
+`${parameter-version:purchase/versions/config-a}`. Full
+`projects/PROJECT/locations/global/parameters/NAME/versions/VERSION` paths are
+also accepted; bare names use `cloud.project`. Only global parameters are supported.
+
+The app must pass the injected version to its Parameter Manager loader. This keeps
+a restarted blue/green revision on the configuration it was deployed with. Its
+parameter document must also use numeric nested secret references, and Terraform
+must retain both parameter and secret versions. Existing revisions that still read
+`latest` are not changed retroactively.
+
+The lookup reads metadata, so it works with `refs.resolve: deny`. The deploy
+identity needs `parametermanager.parameterVersions.get`; pinning native secrets
+needs `secretmanager.versions.get`. Runtime payload permissions remain separate.
+Other clouds refuse this reference kind. Put it in `env` so a version-only change
+triggers deployment. Values in `strategy.env` resolve too, but retain the existing
+behavior of being ignored when detecting environment changes. `envFrom` remains
+a map of literal values read through `${param:...}`.
+
+A traffic rollback reuses the old revision's pins. It does not restore job
+templates. Replaying an old image with a floating selector chooses current
+configuration; select the saved concrete version explicitly for a replay.
 
 ## Everything resolves before anything is written
 

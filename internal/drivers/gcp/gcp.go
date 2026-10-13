@@ -1,26 +1,16 @@
-// Package gcp implements the Cloud Run targets.
-//
-// GCP has one store, and that shapes what the two reference schemes mean here.
-// Cloud Run can mount a Secret Manager secret itself through secretKeyRef, and
-// there is no separate configuration store it can mount — Parameter Manager
-// exists but requires an explicit version in every resource name, with no
-// "latest" alias, which makes it a poor fit for a reference written by hand.
-//
-// So on GCP both schemes read Secret Manager, and the difference between them
-// is who resolves it: ${secret:…} is handed to Cloud Run untouched, ${param:…}
-// is read here and written out as a literal. That is the same distinction as on
-// the other clouds — it is about who does the reading — it just happens that
-// the store is shared.
+// Package gcp implements Cloud Run and deploy-time configuration references.
 package gcp
 
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	run "cloud.google.com/go/run/apiv2"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	parametermanager "google.golang.org/api/parametermanager/v1"
 
 	"github.com/evolve-platform/evolve-deploy/internal/config"
 	"github.com/evolve-platform/evolve-deploy/internal/refs"
@@ -31,10 +21,11 @@ import (
 type Driver struct {
 	file *config.File
 
-	services  *run.ServicesClient
-	revisions *run.RevisionsClient
-	jobs      *run.JobsClient
-	secrets   *secretmanager.Client
+	services   *run.ServicesClient
+	revisions  *run.RevisionsClient
+	jobs       *run.JobsClient
+	secrets    *secretmanager.Client
+	parameters *parametermanager.Service
 
 	// executions only cancels: a job hook's run that outlived its timeout.
 	executions *run.ExecutionsClient
@@ -62,16 +53,21 @@ func New(ctx context.Context, f *config.File) (*Driver, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
+	parameters, err := parametermanager.NewService(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gcp: %w", err)
+	}
 	executions, err := run.NewExecutionsClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
 	}
 	return &Driver{
-		file:      f,
-		services:  services,
-		revisions: revisions,
-		jobs:      jobs,
-		secrets:   secrets,
+		file:       f,
+		services:   services,
+		revisions:  revisions,
+		jobs:       jobs,
+		secrets:    secrets,
+		parameters: parameters,
 
 		executions: executions,
 	}, nil
@@ -149,19 +145,28 @@ func (d *Driver) jobName(name string) string {
 
 type resolver struct{ d *Driver }
 
-// Verify confirms a secret exists without reading it. GetSecret returns
-// metadata only and needs a lighter permission than accessing a version, so a
-// reference that Cloud Run will resolve itself is checked without any value
-// passing through this process.
+// Verify checks metadata without accessing secret values. Versioned references
+// must remain enabled so an old revision can still cold-start during rollback.
 func (r *resolver) Verify(ctx context.Context, v refs.Value) error {
 	if !v.IsRef() {
 		return nil
 	}
-	_, err := r.d.secrets.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{
-		Name: r.secretPath(v.Name),
+	name, version, err := checkedSecretReference(v.Name)
+	if err != nil {
+		return err
+	}
+	if version == "latest" {
+		_, err = r.d.secrets.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: r.secretPath(name)})
+		return err
+	}
+	got, err := r.d.secrets.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{
+		Name: r.secretPath(name) + "/versions/" + version,
 	})
 	if err != nil {
 		return fmt.Errorf("secret %q: %w", v.Name, err)
+	}
+	if got.GetState() != secretmanagerpb.SecretVersion_ENABLED {
+		return fmt.Errorf("secret version %q is %s; use an enabled version", v.Name, got.GetState())
 	}
 	return nil
 }
@@ -170,13 +175,36 @@ func (r *resolver) Read(ctx context.Context, v refs.Value) (string, error) {
 	if !v.IsRef() {
 		return v.Literal, nil
 	}
+	name, version, err := checkedSecretReference(v.Name)
+	if err != nil {
+		return "", err
+	}
 	out, err := r.d.secrets.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
-		Name: r.secretPath(v.Name) + "/versions/latest",
+		Name: r.secretPath(name) + "/versions/" + version,
 	})
 	if err != nil {
 		return "", fmt.Errorf("secret %q: %w", v.Name, err)
 	}
 	return string(out.GetPayload().GetData()), nil
+}
+
+var secretReferencePattern = regexp.MustCompile(`^(projects/[^/]+/secrets/)?[A-Za-z0-9_-]+$`)
+var secretVersionPattern = regexp.MustCompile(`^(latest|[1-9][0-9]*)$`)
+
+func splitSecretVersion(raw string) (name, version string) {
+	name, version, found := strings.Cut(raw, "/versions/")
+	if !found {
+		version = "latest"
+	}
+	return name, version
+}
+
+func checkedSecretReference(raw string) (name, version string, err error) {
+	name, version = splitSecretVersion(raw)
+	if !secretReferencePattern.MatchString(name) || !secretVersionPattern.MatchString(version) {
+		return "", "", fmt.Errorf("invalid Secret Manager reference %q: use a secret name or projects/PROJECT/secrets/NAME, optionally followed by /versions/NUMBER", raw)
+	}
+	return name, version, nil
 }
 
 func (r *resolver) ReadMap(ctx context.Context, v refs.Value) (map[string]string, error) {

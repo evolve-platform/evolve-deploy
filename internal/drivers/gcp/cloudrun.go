@@ -17,11 +17,6 @@ import (
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
 
-// secretVersion is the version Cloud Run reads a referenced secret at. "latest"
-// matches what the cloud-run-service module already writes, so a rotation takes
-// effect on the next revision without a deploy config change.
-const secretVersion = "latest"
-
 // cloudRunContainer has no conventional name: the module leaves the single
 // container unnamed, and Cloud Run only requires names once there are sidecars.
 // PickContainer therefore falls back to "the only one".
@@ -274,13 +269,14 @@ func renderEnv(env []target.EnvVar) []*runpb.EnvVar {
 	out := make([]*runpb.EnvVar, 0, len(env))
 	for _, e := range env {
 		if e.Value.IsRef() {
+			secret, version := splitSecretVersion(e.Value.Name)
 			out = append(out, &runpb.EnvVar{
 				Name: e.Name,
 				Values: &runpb.EnvVar_ValueSource{
 					ValueSource: &runpb.EnvVarSource{
 						SecretKeyRef: &runpb.SecretKeySelector{
-							Secret:  e.Value.Name,
-							Version: secretVersion,
+							Secret:  secret,
+							Version: version,
 						},
 					},
 				},
@@ -296,8 +292,8 @@ func renderEnv(env []target.EnvVar) []*runpb.EnvVar {
 }
 
 // envFingerprint flattens an environment for comparison. A reference is
-// compared by what it points at: the tool cannot see the value, and a rotated
-// secret is not a change it should claim to have made.
+// compared by its secret name and version. A rotation selects a new numeric
+// version at planning time without the tool seeing the secret value.
 //
 // `ignore` is what the tool writes per side. The side alternates every release,
 // so the desired value never matches what the serving revision carries;
@@ -317,6 +313,9 @@ func envFingerprint(env []*runpb.EnvVar, ignore []string) map[string]string {
 		}
 		if src := e.GetValueSource().GetSecretKeyRef(); src != nil {
 			out[e.GetName()] = "->" + src.GetSecret()
+			if version := src.GetVersion(); version != "" && version != "latest" {
+				out[e.GetName()] += "/versions/" + version
+			}
 			continue
 		}
 		out[e.GetName()] = "=" + e.GetValue()

@@ -417,6 +417,7 @@ func Build(
 	}
 
 	names := f.ServiceNames()
+	resolver := refs.NewSnapshot(d.Resolver())
 
 	// Services are planned concurrently. Every call here is read-only, so the
 	// only cost of doing them one at a time is latency — and that adds up: a
@@ -442,7 +443,7 @@ func Build(
 
 	for i, name := range names {
 		g.Go(func() error {
-			cp, errs := planService(gctx, f, d, f.Services[name], vars)
+			cp, errs := planService(gctx, f, d, f.Services[name], vars, resolver)
 			if len(errs) > 0 {
 				report(errs...)
 				return nil
@@ -571,6 +572,7 @@ func planService(
 	d target.Driver,
 	c *config.Service,
 	vars map[string]string,
+	resolver *refs.Snapshot,
 ) (*ServicePlan, []string) {
 	var problems []string
 
@@ -584,8 +586,8 @@ func planService(
 		slog.Debug("planning", "service", c.Name,
 			"target", fmt.Sprintf("%s/%s", t.Type, t.Name), "version", c.Version)
 
-		env, errs := resolveEnv(ctx, f, d, c, t)
-		sideEnv, sideErrs := resolveSideEnv(ctx, f, d, t)
+		env, errs := resolveEnv(ctx, f, d, c, t, resolver)
+		sideEnv, sideErrs := resolveSideEnv(ctx, f, d, t, resolver)
 		errs = append(errs, sideErrs...)
 		if len(errs) > 0 {
 			problems = append(problems, errs...)
@@ -788,11 +790,10 @@ func resolveEnv(
 	d target.Driver,
 	c *config.Service,
 	t *config.Target,
+	resolver *refs.Snapshot,
 ) ([]target.EnvVar, []string) {
 	var problems []string
 	where := fmt.Sprintf("%s/%s", t.Type, t.Name)
-
-	resolver := d.Resolver()
 
 	// Bulk first, so an explicit env entry always wins over the published blob.
 	env := map[string]refs.Value{}
@@ -830,7 +831,7 @@ func resolveEnv(
 		env[name] = v
 	}
 
-	out, errs := resolveValues(ctx, f, d, t, env, where, "env")
+	out, errs := resolveValues(ctx, f, d, t, env, where, "env", resolver)
 	return out, append(problems, errs...)
 }
 
@@ -845,6 +846,7 @@ func resolveSideEnv(
 	f *config.File,
 	d target.Driver,
 	t *config.Target,
+	resolver *refs.Snapshot,
 ) (map[string][]target.EnvVar, []string) {
 	if t.Strategy == nil || len(t.Strategy.Env) == 0 {
 		return nil, nil
@@ -865,7 +867,7 @@ func resolveSideEnv(
 			env[name] = v
 		}
 
-		vars, errs := resolveValues(ctx, f, d, t, env, where, "strategy.env."+side)
+		vars, errs := resolveValues(ctx, f, d, t, env, where, "strategy.env."+side, resolver)
 		problems = append(problems, errs...)
 		out[side] = vars
 	}
@@ -882,9 +884,9 @@ func resolveValues(
 	t *config.Target,
 	env map[string]refs.Value,
 	where, field string,
+	resolver *refs.Snapshot,
 ) ([]target.EnvVar, []string) {
 	var problems []string
-	resolver := d.Resolver()
 	caps := d.Capabilities(t.Type)
 
 	out := make([]target.EnvVar, 0, len(env))
@@ -899,16 +901,17 @@ func resolveValues(
 		native := (v.Kind == refs.Param && caps.NativeParam) ||
 			(v.Kind == refs.Secret && caps.NativeSecret)
 
-		if native {
-			// Hand it to the platform untouched, but still confirm it exists —
-			// otherwise the deploy succeeds and the container fails to start.
+		if native || v.Kind == refs.ParameterVersion {
+			// Capture version metadata before staging so a later publication
+			// cannot change what this revision loads when it restarts.
 			slog.Debug("reference passed to the platform",
 				"target", where, "name", name, "ref", v.Raw)
-			if err := resolver.Verify(ctx, v); err != nil {
+			pinned, err := resolver.Pin(ctx, v)
+			if err != nil {
 				problems = append(problems, fmt.Sprintf("%s: %s.%s: %v", where, field, name, err))
 				continue
 			}
-			out = append(out, target.EnvVar{Name: name, Value: v})
+			out = append(out, target.EnvVar{Name: name, Value: pinned})
 			continue
 		}
 
