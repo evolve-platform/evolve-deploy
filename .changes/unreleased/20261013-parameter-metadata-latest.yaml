@@ -1,3 +1,0 @@
-kind: Fixed
-body: Resolve floating GCP Parameter Manager references by listing version metadata, because the metadata Get API does not resolve latest. Explicit pins still use Get; floating references require parametermanager.parameterVersions.list.
-time: 2026-10-13T13:15:00Z
