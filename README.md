@@ -53,6 +53,55 @@ It needs nothing else installed: no cloud CLI, no Terraform, no runtime. On a
 GitHub runner, use
 [setup-evolve-deploy](https://github.com/evolve-platform/setup-evolve-deploy).
 
+## Pin runtime configuration on GCP
+
+```yaml
+services:
+  purchase:
+    version: abc1234
+    env:
+      PARAMETER_MANAGER_PROJECT: my-project
+      PARAMETER_MANAGER_PARAMETER: purchase
+      PARAMETER_MANAGER_VERSION: ${parameter-version:purchase}
+      API_TOKEN: ${secret:purchase-api-token}
+    targets:
+      - { type: cloud-run, name: purchase }
+      - { type: cloud-run-job, name: purchase-sync }
+```
+
+`${parameter-version:purchase}` resolves the Parameter Manager `latest` selector
+once during planning and writes the concrete version ID as a literal. Use
+`purchase/versions/config-a` to select a specific snapshot, or a full
+`projects/PROJECT/locations/LOCATION/parameters/NAME/versions/VERSION` resource.
+Bare names use the configured project and the `global` location. The app must
+pass this ID to its Parameter Manager loader; reading `latest` at boot defeats
+pinning. A missing or disabled version fails planning.
+
+GCP `${secret:NAME}` references are also resolved to numeric versions during
+planning, without accessing their payloads. Cloud Run receives the secret name
+and numeric version separately. `/versions/NUMBER` explicitly selects an older
+secret. `${param:...}` keeps its existing meaning: reading a value or `envFrom`
+JSON document from Secret Manager, with optional `/versions/NUMBER` support.
+
+Identical selectors are captured once per plan across services, jobs and side
+environments. A new plan resolves them again; changing only a version still
+produces an environment change. Metadata resolution works with `refs.resolve:
+deny`; it does not read a parameter payload or a secret value. Other clouds
+refuse `parameter-version` references. Declare them in `env`, not `envFrom`.
+
+The deploy identity needs `parametermanager.parameterVersions.get` and
+`secretmanager.versions.get` in addition to its existing permissions. The runtime
+identity still reads the parameter payload; Parameter Manager resolves its
+secret references. Publish those references with numeric versions and retain
+both parameter and secret versions for the supported rollback window. Parent
+resources, IAM access and upstream credentials must remain valid too.
+
+A traffic rollback reuses the previous revision's stored pins, including on a
+cold start. It does not restore job templates. Redeploying an old image with an
+unpinned selector chooses the latest configuration again; explicitly select the
+old version for a replay. Revisions deployed before pinning retain their old
+behavior. Sidecar environments remain infrastructure-owned.
+
 ## Development
 
 ```sh

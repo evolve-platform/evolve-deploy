@@ -1,4 +1,4 @@
-// Package refs parses and resolves the ${param:…} and ${secret:…} references
+// Package refs parses and resolves configuration and version references
 // that appear as env-var values in a deploy config.
 //
 // The config never contains a value — only literals that are safe to read in a
@@ -26,6 +26,8 @@ const (
 	// Secret points at the cloud's secret store: Secrets Manager, Secret
 	// Manager, Key Vault, a Kubernetes Secret.
 	Secret
+	// ParameterVersion selects a concrete runtime configuration version.
+	ParameterVersion
 )
 
 func (k Kind) String() string {
@@ -34,6 +36,8 @@ func (k Kind) String() string {
 		return "param"
 	case Secret:
 		return "secret"
+	case ParameterVersion:
+		return "parameter-version"
 	default:
 		return "literal"
 	}
@@ -100,7 +104,7 @@ func Parse(s string) (Value, error) {
 
 	scheme, name, ok := strings.Cut(inner, ":")
 	if !ok {
-		return Value{}, fmt.Errorf("reference %q is missing a scheme, want ${param:…} or ${secret:…}", s)
+		return Value{}, fmt.Errorf("reference %q is missing a scheme, want ${param:…}, ${secret:…} or ${parameter-version:…}", s)
 	}
 	if name == "" {
 		return Value{}, fmt.Errorf("reference %q has an empty name", s)
@@ -111,8 +115,10 @@ func Parse(s string) (Value, error) {
 		return Value{Kind: Param, Name: name, Raw: s}, nil
 	case "secret":
 		return Value{Kind: Secret, Name: name, Raw: s}, nil
+	case "parameter-version":
+		return Value{Kind: ParameterVersion, Name: name, Raw: s}, nil
 	default:
-		return Value{}, fmt.Errorf("unknown reference scheme %q in %q, want param or secret", scheme, s)
+		return Value{}, fmt.Errorf("unknown reference scheme %q in %q, want param, secret or parameter-version", scheme, s)
 	}
 }
 

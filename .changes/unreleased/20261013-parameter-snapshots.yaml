@@ -1,0 +1,3 @@
+kind: Added
+body: Resolve GCP Parameter Manager version selectors and native secret references once per deployment so restarting Cloud Run revisions keep their configuration snapshot.
+time: 2026-10-13T13:00:00Z

@@ -57,7 +57,7 @@
       "items": { "$ref": "#/definitions/text" }
     },
     "env": {
-      "description": "Environment variables, KEY: value. Values may be references such as ${secret:NAME} or ${param:PATH}.",
+      "description": "Environment variables, KEY: value. Values may be references such as ${secret:NAME}, ${param:PATH}, or ${parameter-version:NAME} (GCP version metadata).",
       "type": "object",
       "additionalProperties": { "$ref": "#/definitions/text" }
     },

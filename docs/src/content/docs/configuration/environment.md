@@ -216,8 +216,9 @@ The base is the service's `template`, for the same reason as on Azure, and the
 write carries only the `template` field mask — ingress, IAM and the traffic split
 are not part of it.
 
-A `${secret:…}` becomes a `secretKeyRef` that Cloud Run resolves when the
-revision starts, so no secret value passes through this tool. A `${param:…}`
+A `${secret:…}` becomes a `secretKeyRef` with a numeric version captured during
+planning. Cloud Run reads that version when the instance starts, so no secret
+value passes through this tool and restarting an old revision keeps its secret. A `${param:…}`
 resolves against Secret Manager, which Cloud Run cannot be pointed at for a plain
 value, so the tool reads it and writes a literal. Two reference kinds, one handed
 over and one read — see [References and secrets](../references/).
@@ -311,7 +312,9 @@ from, and from nothing remembered between runs:
 - **A reference is compared by what it points at**, never by its value. The tool
   cannot see what a `secretRef` holds, and a rotated secret is not a change it
   should claim to have made. Moving `CTP_SECRET` from `${secret:a}` to
-  `${secret:b}` shows up; rotating `a` does not.
+  `${secret:b}` shows up. On GCP, the numeric secret version is part of that
+  reference: rotating `a` selects a new version on the next deploy and is reported
+  as an environment change.
 - `EVOLVE_DEPLOY_SIDE` and every variable named by `strategy.env` are left out.
   They differ by side by definition, so comparing them would report a change on
   every run — and a change on every run is a deploy on every run, flipping the

@@ -25,6 +25,11 @@ func TestParse(t *testing.T) {
 			want: Value{Kind: Param, Name: "/platform/redis-url", Raw: "${param:/platform/redis-url}"},
 		},
 		{
+			name: "parameter version",
+			in:   "${parameter-version:purchase/versions/config-a}",
+			want: Value{Kind: ParameterVersion, Name: "purchase/versions/config-a", Raw: "${parameter-version:purchase/versions/config-a}"},
+		},
+		{
 			name: "secret",
 			in:   "${secret:purchase/ctp-client-secret}",
 			want: Value{Kind: Secret, Name: "purchase/ctp-client-secret", Raw: "${secret:purchase/ctp-client-secret}"},
