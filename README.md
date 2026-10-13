@@ -69,8 +69,10 @@ services:
       - { type: cloud-run-job, name: purchase-sync }
 ```
 
-`${parameter-version:purchase}` resolves the Parameter Manager `latest` selector
-once during planning and writes the concrete version ID as a literal. Use
+`${parameter-version:purchase}` selects the newest Parameter Manager version by
+creation time once during planning and writes its concrete ID as a literal. The
+same selection applies to `/versions/latest`. This lists metadata across all
+pages: the metadata Get API does not resolve the render API's `latest` selector. Use
 `purchase/versions/config-a` to select a specific snapshot, or a full
 `projects/PROJECT/locations/global/parameters/NAME/versions/VERSION` resource.
 Bare names use the configured project. Only global parameters are supported. The app must
@@ -89,7 +91,8 @@ produces an environment change when declared in `env`. Metadata resolution works
 deny`; it does not read a parameter payload or a secret value. Other clouds
 refuse `parameter-version` references. Declare them in `env`, not `envFrom`.
 
-The deploy identity needs `parametermanager.parameterVersions.get` and
+The deploy identity needs `parametermanager.parameterVersions.list` for floating
+selectors, `parametermanager.parameterVersions.get` for explicit pins, and
 `secretmanager.versions.get` in addition to its existing permissions. The runtime
 identity still reads the parameter payload; Parameter Manager resolves its
 secret references. Publish those references with numeric versions and retain
@@ -115,6 +118,14 @@ CI runs formatting, `go test -race`, golangci-lint and a full goreleaser build.
 Running the four above before pushing means a green run here is a green run
 there — `go vet` alone is not enough, since the lint job adds staticcheck and
 revive on top of it.
+
+An opt-in live check verifies Parameter Manager lookup using application default
+credentials and an existing global parameter. It reads only metadata:
+
+```sh
+EVOLVE_GCP_PIN_PROJECT=my-project EVOLVE_GCP_PIN_PARAMETER=purchase \
+  go test -tags=integration ./internal/drivers/gcp -run TestPinParameterVersionLive -count=1 -v
+```
 
 User-visible changes need a [changie](https://changie.dev) entry in
 `.changes/unreleased/`. While a feature is still unreleased, amend its existing

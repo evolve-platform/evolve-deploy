@@ -112,8 +112,11 @@ env:
   PARAMETER_MANAGER_VERSION: ${parameter-version:purchase}
 ```
 
-`${parameter-version:NAME}` resolves Parameter Manager's `latest` selector once
-per plan and writes the concrete version ID as a literal. The same selector is
+`${parameter-version:NAME}` selects the newest Parameter Manager version by
+creation time once per plan and writes the concrete ID as a literal. An explicit
+`/versions/latest` uses the same selection. The lookup lists version metadata
+across all pages because the metadata Get API does not resolve the render API's
+`latest` selector. The same selector is
 shared across targets, including jobs. Each new plan resolves it again. A missing
 or disabled selected version fails planning. Explicit pins use
 `${parameter-version:purchase/versions/config-a}`. Full
@@ -127,8 +130,9 @@ must retain both parameter and secret versions. Existing revisions that still re
 `latest` are not changed retroactively.
 
 The lookup reads metadata, so it works with `refs.resolve: deny`. The deploy
-identity needs `parametermanager.parameterVersions.get`; pinning native secrets
-needs `secretmanager.versions.get`. Runtime payload permissions remain separate.
+identity needs `parametermanager.parameterVersions.list` for floating selectors
+and `parametermanager.parameterVersions.get` for explicit pins; pinning native
+secrets needs `secretmanager.versions.get`. Runtime payload permissions remain separate.
 Other clouds refuse this reference kind. Put it in `env` so a version-only change
 triggers deployment. Values in `strategy.env` resolve too, but retain the existing
 behavior of being ignored when detecting environment changes. `envFrom` remains
