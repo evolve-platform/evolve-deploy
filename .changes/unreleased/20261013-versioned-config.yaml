@@ -1,0 +1,3 @@
+kind: Changed
+body: Support numeric GCP Secret Manager versions in param and secret references, and native secret references inside envFrom documents. Pinned references retain their version in Cloud Run services and jobs and secret-version changes trigger a rollout. Rollback checks image consistency within a service and refuses to skip jobs or direct targets unless --traffic-only is set.
+time: 2026-10-13T12:00:00+02:00

@@ -158,7 +158,7 @@ func TestAJobReferenceBecomesASecretKeyRef(t *testing.T) {
 	}
 
 	src := jobContainers(next)[0].GetEnv()[0].GetValueSource().GetSecretKeyRef()
-	if src.GetSecret() != "discover-ctp" || src.GetVersion() != secretVersion {
+	if src.GetSecret() != "discover-ctp" || src.GetVersion() != "latest" {
 		t.Errorf("secretKeyRef = %v", src)
 	}
 }

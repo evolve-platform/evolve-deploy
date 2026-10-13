@@ -807,7 +807,7 @@ func resolveEnv(
 		// instead of only where the platform leaves no choice.
 		if ref.Kind != refs.Param {
 			problems = append(problems, fmt.Sprintf(
-				"%s: envFrom takes ${param:…}, not %s — put secrets in env as individual refs",
+				"%s: envFrom takes ${param:…}, not %s — put secrets in individual env entries or envFrom values",
 				where, ref.Kind))
 			continue
 		}
@@ -817,7 +817,18 @@ func resolveEnv(
 			continue
 		}
 		for k, v := range values {
-			env[k] = refs.Value{Kind: refs.Literal, Literal: v, Raw: v}
+			// Bulk documents also carry templates for the application. Only the
+			// two reference prefixes opt into parsing; other ${...} stays literal.
+			if !strings.HasPrefix(v, "${param:") && !strings.HasPrefix(v, "${secret:") {
+				env[k] = refs.Value{Kind: refs.Literal, Literal: v, Raw: v}
+				continue
+			}
+			value, err := refs.Parse(refs.Substitute(v, f.Env))
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s: envFrom %s.%s: %v", where, ref.Raw, k, err))
+				continue
+			}
+			env[k] = value
 		}
 	}
 

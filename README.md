@@ -53,6 +53,33 @@ It needs nothing else installed: no cloud CLI, no Terraform, no runtime. On a
 GitHub runner, use
 [setup-evolve-deploy](https://github.com/evolve-platform/setup-evolve-deploy).
 
+## Versioned GCP configuration and rollback
+
+Both `${param:secret-name/versions/7}` and `${secret:secret-name/versions/7}`
+accept a numeric Secret Manager version (full `projects/P/secrets/S/versions/N`
+paths work too). Without a suffix they keep the existing `latest` behavior.
+A native secret reference is verified using version metadata, never its payload;
+the deploy identity needs `secretmanager.versions.get` as well as the existing
+permissions. Disabled or destroyed pinned versions fail planning.
+
+An `envFrom` JSON document may contain whole `${secret:...}` or `${param:...}`
+values. They follow the same target capabilities and `refs.resolve` policy as
+explicit environment entries; explicit `env` entries win. Other strings remain
+literal, including application templates containing `${...}`. Reference-shaped
+values in older documents now opt into reference handling.
+
+Pin the environment document itself and every secret it references, retain those
+versions, and save the actual image versions supplied through `--set` for replay.
+A runtime configuration store must also be addressed by an immutable version in
+the container environment. Restoring traffic cannot restore a mutable store.
+
+`rollback` compares versions within each service's sibling targets; different
+services may have different tags. It refuses configs containing jobs or direct
+targets because it cannot restore them by moving traffic. `--traffic-only`
+explicitly leaves those targets unchanged. To restore jobs too, apply a saved
+release config containing the old image versions, environment pins and commands.
+Traffic rollback does not replay schema-publication hooks or undo external data.
+
 ## Development
 
 ```sh

@@ -15,6 +15,8 @@ import (
 	"github.com/evolve-platform/evolve-deploy/internal/target"
 )
 
+var flagRollbackTrafficOnly bool
+
 var rollbackCmd = &cobra.Command{
 	Use:   "rollback <config>",
 	Short: "Move all the traffic back to the side that was serving before",
@@ -31,7 +33,11 @@ is not serving is the previous version, and this hands it everything.
 It works out which side that is per target and refuses if they disagree, because
 half an environment on the old version is worse than either version. It refuses
 just as loudly when the traffic is already split, when a side has nothing to go
-back to, and when the two sides do not hold the same version everywhere.
+back to, and when sibling targets of a service do not hold the same version.
+
+Jobs and direct targets have no previous traffic side. A config containing
+those is refused unless --traffic-only explicitly leaves them unchanged.
+To restore the whole release, apply its saved config with pinned references.
 
 The previous version is normally stopped after a switch — it keeps its label,
 not its replicas — so this starts it and waits for it before moving anything.
@@ -66,6 +72,9 @@ version is usually a mistake, and this is how you say it is not.`,
 		rollout, ok := driver.(target.Rollout)
 		if !ok {
 			return fmt.Errorf("%s cannot move traffic by label", driver.Name())
+		}
+		if err := checkRollbackScope(f, rollout, flagRollbackTrafficOnly); err != nil {
+			return err
 		}
 		if err := driver.Verify(ctx); err != nil {
 			return err
@@ -259,12 +268,11 @@ func planRollback(
 //
 // A release puts every blue-green service on the same side at the same moment,
 // so undoing it is one move in reverse. Two targets that would go back to
-// different sides, or to different versions, mean a release died between them —
-// and finishing that job in the other direction is not what anyone typed this
-// for.
+// different sides, or sibling targets going back to different versions, mean
+// the release does not have one coherent previous side.
 func agreeOnRollback(steps []rollbackStep) error {
 	sides := map[string]bool{}
-	versions := map[string]bool{}
+	versions := map[string]map[string]bool{}
 	for _, s := range steps {
 		sides[s.to.Label] = true
 		// A version the platform keeps no record of is the absence of an
@@ -274,7 +282,11 @@ func agreeOnRollback(steps []rollbackStep) error {
 		// revision predates the annotation the version is now stamped in, so
 		// one target reads a tag and the next reads nothing.
 		if s.to.Version != "" {
-			versions[s.to.Version] = true
+			service := s.target.Service
+			if versions[service] == nil {
+				versions[service] = map[string]bool{}
+			}
+			versions[service][s.to.Version] = true
 		}
 	}
 
@@ -290,14 +302,19 @@ func agreeOnRollback(steps []rollbackStep) error {
 			strings.Join(names, " and "), describeSteps(steps))
 	}
 
-	// Going back to two different versions is not one rollback, it is two. The
-	// versions are the whole point of the line printed before the move, so a
-	// mismatch has to stop here rather than be printed and carried out.
-	if len(versions) > 1 {
-		return fmt.Errorf(
-			"the idle side does not hold the same version everywhere:\n%s\n"+
-				"    a rollback moves the environment as one, so resolve this per target with\n"+
-				"    `evolve-deploy traffic <config> --to <label>`", describeSteps(steps))
+	// Sibling targets share an image; unrelated services have independent tags.
+	services := make([]string, 0, len(versions))
+	for service := range versions {
+		services = append(services, service)
+	}
+	sort.Strings(services)
+	for _, service := range services {
+		if len(versions[service]) > 1 {
+			return fmt.Errorf(
+				"the idle targets of service %q do not hold the same version:\n%s\n"+
+					"    restore the service's targets together with a saved release config",
+				service, describeSteps(steps))
+		}
 	}
 	return nil
 }
@@ -397,8 +414,8 @@ func runRollback(
 	// runs this is undoing a release, and the half of a release that is not
 	// traffic is not undone by moving traffic.
 	fmt.Fprint(out,
-		"\nThis moved traffic only. Anything published per side — a Hive target,\n"+
-			"a schema registry — still describes the version that was serving before.\n")
+		"\nThis moved traffic only. Jobs and direct targets were not changed, and\n"+
+			"schema publication hooks were not replayed.\n")
 	return nil
 }
 
@@ -414,6 +431,27 @@ func describeSteps(steps []rollbackStep) string {
 	return b.String()
 }
 
+func checkRollbackScope(f *config.File, r target.Rollout, trafficOnly bool) error {
+	if trafficOnly {
+		return nil
+	}
+	var skipped []string
+	for _, service := range f.ServiceNames() {
+		for _, t := range f.Services[service].Targets {
+			if !t.Strategy.IsBlueGreen() || !r.Routable(t.Type) {
+				skipped = append(skipped, t.Label())
+			}
+		}
+	}
+	if len(skipped) == 0 {
+		return nil
+	}
+	sort.Strings(skipped)
+	return fmt.Errorf("rollback only moves traffic and cannot restore these targets: %s; apply a saved release config to restore their image, environment and command, or use --traffic-only to leave them unchanged", strings.Join(skipped, ", "))
+}
+
 func init() {
+	rollbackCmd.Flags().BoolVar(&flagRollbackTrafficOnly, "traffic-only", false,
+		"move traffic while leaving jobs and direct targets unchanged")
 	RootCmd.AddCommand(rollbackCmd)
 }

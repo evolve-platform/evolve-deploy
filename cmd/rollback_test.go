@@ -227,3 +227,35 @@ func (delegatingDriver) Undo(context.Context, *config.Target) (string, error) {
 }
 
 type plainDriver struct{ target.Driver }
+
+func TestRollbackAllowsIndependentServiceVersions(t *testing.T) {
+	a, b := bgTarget("purchase"), bgTarget("gateway")
+	a.Service, b.Service = "purchase", "gateway"
+	steps := []rollbackStep{
+		{target: a, to: entry("blue", "purchase-old", "abc123", 0)},
+		{target: b, to: entry("blue", "gateway-old", "0.3.0", 0)},
+	}
+	if err := agreeOnRollback(steps); err != nil {
+		t.Fatal(err)
+	}
+	b.Service = "purchase"
+	if err := agreeOnRollback(steps); err == nil {
+		t.Fatal("accepted mismatched sibling versions")
+	}
+}
+
+func TestRollbackRefusesToSilentlySkipJobs(t *testing.T) {
+	strategy := &config.Strategy{Type: config.StrategyBlueGreen}
+	f := &config.File{Services: map[string]*config.Service{"app": {
+		Targets: []*config.Target{
+			{Name: "app", Type: config.TypeECS, Strategy: strategy},
+			{Name: "job", Type: config.TypeLambda, Strategy: strategy},
+		},
+	}}}
+	if err := checkRollbackScope(f, pointingRollout{}, false); err == nil || !strings.Contains(err.Error(), "job") {
+		t.Fatalf("error = %v", err)
+	}
+	if err := checkRollbackScope(f, pointingRollout{}, true); err != nil {
+		t.Fatal(err)
+	}
+}
