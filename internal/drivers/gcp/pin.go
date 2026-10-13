@@ -43,13 +43,13 @@ func (r *resolver) Pin(ctx context.Context, v refs.Value) (refs.Value, error) {
 	}
 }
 
-var parameterReferencePattern = regexp.MustCompile(`^(projects/[^/]+/locations/[^/]+/parameters/)?[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$`)
+var parameterReferencePattern = regexp.MustCompile(`^(projects/[^/]+/locations/global/parameters/)?[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$`)
 var parameterVersionPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_-]{0,62}$`)
 
 func (r *resolver) pinParameter(ctx context.Context, v refs.Value) (refs.Value, error) {
 	name, version := splitSecretVersion(v.Name)
 	if !parameterReferencePattern.MatchString(name) || !parameterVersionPattern.MatchString(version) {
-		return refs.Value{}, fmt.Errorf("invalid Parameter Manager reference %q: use NAME or projects/PROJECT/locations/LOCATION/parameters/NAME, optionally followed by /versions/VERSION", v.Name)
+		return refs.Value{}, fmt.Errorf("invalid Parameter Manager reference %q: use NAME or projects/PROJECT/locations/global/parameters/NAME, optionally followed by /versions/VERSION; regional parameters are not supported", v.Name)
 	}
 	if !strings.HasPrefix(name, "projects/") {
 		name = fmt.Sprintf("projects/%s/locations/global/parameters/%s", r.d.file.Cloud.Project, name)

@@ -117,8 +117,8 @@ per plan and writes the concrete version ID as a literal. The same selector is
 shared across targets, including jobs. Each new plan resolves it again. A missing
 or disabled selected version fails planning. Explicit pins use
 `${parameter-version:purchase/versions/config-a}`. Full
-`projects/PROJECT/locations/LOCATION/parameters/NAME/versions/VERSION` paths are
-also accepted; bare names use `cloud.project` and the `global` location.
+`projects/PROJECT/locations/global/parameters/NAME/versions/VERSION` paths are
+also accepted; bare names use `cloud.project`. Only global parameters are supported.
 
 The app must pass the injected version to its Parameter Manager loader. This keeps
 a restarted blue/green revision on the configuration it was deployed with. Its
@@ -129,8 +129,10 @@ must retain both parameter and secret versions. Existing revisions that still re
 The lookup reads metadata, so it works with `refs.resolve: deny`. The deploy
 identity needs `parametermanager.parameterVersions.get`; pinning native secrets
 needs `secretmanager.versions.get`. Runtime payload permissions remain separate.
-Other clouds refuse this reference kind. Put it in `env` or `strategy.env`;
-`envFrom` remains a map of literal values read through `${param:...}`.
+Other clouds refuse this reference kind. Put it in `env` so a version-only change
+triggers deployment. Values in `strategy.env` resolve too, but retain the existing
+behavior of being ignored when detecting environment changes. `envFrom` remains
+a map of literal values read through `${param:...}`.
 
 A traffic rollback reuses the old revision's pins. It does not restore job
 templates. Replaying an old image with a floating selector chooses current

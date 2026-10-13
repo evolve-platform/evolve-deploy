@@ -72,8 +72,8 @@ services:
 `${parameter-version:purchase}` resolves the Parameter Manager `latest` selector
 once during planning and writes the concrete version ID as a literal. Use
 `purchase/versions/config-a` to select a specific snapshot, or a full
-`projects/PROJECT/locations/LOCATION/parameters/NAME/versions/VERSION` resource.
-Bare names use the configured project and the `global` location. The app must
+`projects/PROJECT/locations/global/parameters/NAME/versions/VERSION` resource.
+Bare names use the configured project. Only global parameters are supported. The app must
 pass this ID to its Parameter Manager loader; reading `latest` at boot defeats
 pinning. A missing or disabled version fails planning.
 
@@ -85,7 +85,7 @@ JSON document from Secret Manager, with optional `/versions/NUMBER` support.
 
 Identical selectors are captured once per plan across services, jobs and side
 environments. A new plan resolves them again; changing only a version still
-produces an environment change. Metadata resolution works with `refs.resolve:
+produces an environment change when declared in `env`. Metadata resolution works with `refs.resolve:
 deny`; it does not read a parameter payload or a secret value. Other clouds
 refuse `parameter-version` references. Declare them in `env`, not `envFrom`.
 

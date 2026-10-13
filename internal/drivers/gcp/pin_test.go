@@ -28,8 +28,6 @@ func TestPinCapturesParameterAndSecretMetadata(t *testing.T) {
 				t.Error("requested parameter payload")
 			}
 			fmt.Fprint(w, `{"name":"projects/test/locations/global/parameters/purchase/versions/config-a"}`)
-		case "/v1/projects/test/locations/europe-west4/parameters/purchase/versions/config-a":
-			fmt.Fprint(w, `{"name":"projects/test/locations/europe-west4/parameters/purchase/versions/config-a"}`)
 		case "/v1/projects/test/locations/global/parameters/purchase/versions/disabled":
 			fmt.Fprint(w, `{"name":"projects/test/locations/global/parameters/purchase/versions/disabled","disabled":true}`)
 		case "/v1/projects/test/locations/global/parameters/purchase/versions/unresolved":
@@ -57,13 +55,13 @@ func TestPinCapturesParameterAndSecretMetadata(t *testing.T) {
 		}
 	})
 	r := &resolver{d: &Driver{file: &config.File{Cloud: config.CloudConfig{Project: "test"}}, parameters: pm, secrets: sm}}
-	for _, name := range []string{"purchase", "purchase/versions/latest", "purchase/versions/config-a", "projects/test/locations/europe-west4/parameters/purchase/versions/config-a"} {
+	for _, name := range []string{"purchase", "purchase/versions/latest", "purchase/versions/config-a", "projects/test/locations/global/parameters/purchase/versions/config-a"} {
 		got, err := r.Pin(ctx, refs.Value{Kind: refs.ParameterVersion, Name: name})
 		if err != nil || got.Kind != refs.Literal || got.Literal != "config-a" {
 			t.Fatalf("%s: %+v, %v", name, got, err)
 		}
 	}
-	for _, name := range []string{"purchase/versions/disabled", "purchase/versions/unresolved", "missing", "purchase/versions/", "purchase/versions/a/b"} {
+	for _, name := range []string{"purchase/versions/disabled", "purchase/versions/unresolved", "missing", "purchase/versions/", "purchase/versions/a/b", "projects/test/locations/europe-west4/parameters/purchase/versions/config-a"} {
 		if _, err := r.Pin(ctx, refs.Value{Kind: refs.ParameterVersion, Name: name}); err == nil {
 			t.Fatalf("accepted %s", name)
 		}
