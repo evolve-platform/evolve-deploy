@@ -23,7 +23,12 @@ func TestPinCapturesParameterAndSecretMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch req.URL.Path {
-		case "/v1/projects/test/locations/global/parameters/purchase/versions/latest", "/v1/projects/test/locations/global/parameters/purchase/versions/config-a":
+		case "/v1/projects/test/locations/global/parameters/purchase/versions":
+			if req.URL.Query().Get("fields") != "parameterVersions(name,createTime,disabled),nextPageToken,unreachable" {
+				t.Error("requested more than version metadata")
+			}
+			fmt.Fprint(w, `{"parameterVersions":[{"name":"projects/test/locations/global/parameters/purchase/versions/config-a","createTime":"2026-10-13T13:02:38.196853716Z"}]}`)
+		case "/v1/projects/test/locations/global/parameters/purchase/versions/config-a":
 			if req.URL.Query().Get("view") != "BASIC" {
 				t.Error("requested parameter payload")
 			}
