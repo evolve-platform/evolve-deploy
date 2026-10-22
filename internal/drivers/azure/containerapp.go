@@ -178,7 +178,7 @@ func (d *Driver) patchApp(
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
-	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+	if _, err := finish(ctx, d, poller); err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
 	timer.Done()

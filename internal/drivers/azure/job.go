@@ -113,7 +113,7 @@ func (d *Driver) patchJob(ctx context.Context, name string, containers []*armapp
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
-	res, err := poller.PollUntilDone(ctx, nil)
+	res, err := finish(ctx, d, poller)
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}

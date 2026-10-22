@@ -668,7 +668,7 @@ func (d *Driver) patchTemplate(
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
-	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+	if _, err := finish(ctx, d, poller); err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
 	timer.Done()
@@ -700,12 +700,17 @@ func (d *Driver) patchTraffic(
 	if err != nil {
 		return fmt.Errorf("traffic update: %w", err)
 	}
-	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
+	if _, err := finish(ctx, d, poller); err != nil {
 		return fmt.Errorf("traffic update: %w", err)
 	}
 	timer.Done()
 	return nil
 }
+
+// revisionScaledToZero is a running state the API reports and the SDK has no
+// constant for: provisioned, and holding no replicas because nothing asked it
+// for any.
+const revisionScaledToZero armappcontainers.RevisionRunningState = "ScaledToZero"
 
 func (d *Driver) deactivate(ctx context.Context, app, revision string) error {
 	timer := logging.Start("deactivate revision", "app", app, "revision", revision)
@@ -755,6 +760,11 @@ func (d *Driver) activateIfStopped(ctx context.Context, app, revision string) er
 // look at: that pointer is sticky and keeps naming a revision that has since
 // been deactivated, so it answers "yes" for something with no replicas. Asking
 // the revision itself cannot be fooled that way.
+//
+// A revision that scales to zero and carries no traffic is never asked for a
+// replica, so it will not reach Running by itself. Healthy at zero replicas is
+// accepted instead: the smoke test that follows is the first request, and it
+// is what wakes it.
 func (d *Driver) waitRunning(
 	ctx context.Context,
 	app, revision string,
@@ -785,6 +795,15 @@ func (d *Driver) waitRunning(
 					*props.HealthState != armappcontainers.RevisionHealthStateUnhealthy) {
 				slog.Debug("revision is running", "app", app, "revision", revision,
 					"elapsed", time.Since(started).Round(time.Second))
+				return nil
+			}
+
+			if props.RunningState != nil &&
+				*props.RunningState == revisionScaledToZero &&
+				props.HealthState != nil &&
+				*props.HealthState == armappcontainers.RevisionHealthStateHealthy {
+				slog.Debug("revision is scaled to zero and healthy", "app", app,
+					"revision", revision, "elapsed", time.Since(started).Round(time.Second))
 				return nil
 			}
 
