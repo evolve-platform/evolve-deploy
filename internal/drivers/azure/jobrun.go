@@ -120,7 +120,7 @@ func (d *Driver) startJob(ctx context.Context, name string, timeout time.Duratio
 	if err != nil {
 		return fmt.Errorf("container app job %s: start: %w", name, err)
 	}
-	started, err := poller.PollUntilDone(ctx, nil)
+	started, err := finish(ctx, d, poller)
 	if err != nil {
 		return fmt.Errorf("container app job %s: start: %w", name, err)
 	}
@@ -184,7 +184,7 @@ func (d *Driver) stopExecution(ctx context.Context, name, exec string, timeout t
 	stop := context.WithoutCancel(ctx)
 	poller, err := d.jobs.BeginStopExecution(stop, d.file.Cloud.ResourceGroup, name, exec, nil)
 	if err == nil {
-		_, err = poller.PollUntilDone(stop, nil)
+		_, err = finish(stop, d, poller)
 	}
 	if err != nil {
 		return fmt.Errorf("%w, and stopping it failed, so it may still be running: %w", late, err)

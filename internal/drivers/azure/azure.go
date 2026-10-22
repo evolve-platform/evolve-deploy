@@ -22,6 +22,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/data/azappconfig"
@@ -72,6 +73,11 @@ type Driver struct {
 	// itself does not have to spend five seconds per poll to find out what it
 	// decided.
 	poll time.Duration
+
+	// writeTimeout bounds how long an ARM write may stay in progress. A field
+	// for the same reason poll is one: a test of the deadline cannot spend
+	// minutes reaching it.
+	writeTimeout time.Duration
 }
 
 // New builds a driver from the ambient credential chain — in CI that is the
@@ -124,8 +130,9 @@ func newDriver(f *config.File, cred azcore.TokenCredential, opts *arm.ClientOpti
 		revisions: revisions, replicas: replicas, executions: executions,
 		// Long enough for a package upload on a slow link; the deployment
 		// itself is waited for separately.
-		http: &http.Client{Timeout: 5 * time.Minute},
-		poll: pollInterval,
+		http:         &http.Client{Timeout: 5 * time.Minute},
+		poll:         pollInterval,
+		writeTimeout: writeTimeout,
 	}
 
 	if f.Cloud.AppConfig != "" {
@@ -138,6 +145,34 @@ func newDriver(f *config.File, cred azcore.TokenCredential, opts *arm.ClientOpti
 }
 
 func (d *Driver) Name() string { return "azure" }
+
+// writeTimeout is how long a write ARM has accepted may take to finish. One
+// normally finishes in well under a minute.
+//
+// Without a bound, a write Container Apps never completes kept the release
+// waiting until CI killed the job, with nothing in the log to say which
+// operation was stuck. Every later write to that app is refused with
+// ContainerAppOperationInProgress until it does finish.
+const writeTimeout = 5 * time.Minute
+
+// finish waits for a write ARM has accepted, up to d.writeTimeout.
+//
+// Only the wait is bounded, not the caller's context, so what the caller does
+// next — putting the traffic back — still gets to run. That attempt is likely to
+// be refused while the write is still in progress, and the refusal says so.
+func finish[T any](ctx context.Context, d *Driver, poller *runtime.Poller[T]) (T, error) {
+	wait, cancel := context.WithTimeout(ctx, d.writeTimeout)
+	defer cancel()
+
+	res, err := poller.PollUntilDone(wait, nil)
+	if err != nil && ctx.Err() == nil && errors.Is(wait.Err(), context.DeadlineExceeded) {
+		return res, fmt.Errorf(
+			"still in progress after %s; Azure accepted the write but had not finished it, "+
+				"and refuses further writes to this resource until it does. Its "+
+				"provisioningState says when it has", d.writeTimeout)
+	}
+	return res, err
+}
 
 // Capabilities: a Container App resolves a secret reference itself, but only
 // one that is already declared on it. It has no equivalent for App
