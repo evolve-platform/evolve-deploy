@@ -1,3 +1,0 @@
-kind: Fixed
-body: Give up on an Azure write that is still in progress after five minutes, and say so, instead of waiting until CI kills the job. Container Apps refuses every later write to that app with ContainerAppOperationInProgress until the stuck one finishes.
-time: 2026-10-22T05:45:00Z
