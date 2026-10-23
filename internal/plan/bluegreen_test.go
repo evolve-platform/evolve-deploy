@@ -422,6 +422,37 @@ services:
 	}
 }
 
+// A rider whose write failed has already put itself back, so a failed switch
+// reverts only the riders that were written. Reverting the failed one again is a
+// second write and, for a worker, a second ready wait for nothing.
+func TestAFailedSwitchRevertsOnlyTheRidersItWrote(t *testing.T) {
+	d := newRolloutDriver()
+	d.failApply["discover-sync"] = true
+
+	_, _, err := runBlueGreen(t, d, header+`
+strategy:
+  type: blue-green
+
+services:
+  discover:
+    version: new
+    cluster: platform
+    targets:
+      - { type: ecs, name: discover }
+      - { type: lambda, name: discover-sync, code: { bucket: b, key: k.zip } }
+      - { type: lambda, name: discover-index, code: { bucket: b, key: k.zip } }
+`)
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !contains(d.reverted, "discover-index") {
+		t.Errorf("reverted = %v, want the rider that was written put back", d.reverted)
+	}
+	if contains(d.reverted, "discover-sync") {
+		t.Errorf("reverted = %v, the rider that failed had already reverted itself", d.reverted)
+	}
+}
+
 // Whether a target carries traffic is asked of the target, not its type. Two
 // targets of one type can differ — a container app and a worker beside it — and
 // the one the driver calls a worker is written at the switch like any rider,

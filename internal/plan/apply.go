@@ -525,9 +525,9 @@ func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options)
 		}
 	}
 
-	if errs := switchAll(ctx, rollout, routable, riders, o); len(errs) > 0 {
+	if errs, written := switchAll(ctx, rollout, routable, riders, o); len(errs) > 0 {
 		undone := abandonAll(ctx, rollout, changes(routable), o)
-		undone = append(undone, revert(ctx, changes(riders), o)...)
+		undone = append(undone, revert(ctx, written, o)...)
 		return &releaseError{
 			phase: "switching to " + side,
 			state: putBack(serving, len(undone) > 0),
@@ -774,16 +774,20 @@ func stagedLookup(
 // The riders go with it rather than before it: a job shares its image with the
 // service beside it, and updating it while the old version still serves is the
 // mixed state this whole mechanism exists to avoid.
+//
+// It returns the riders that were written, which are the only ones a failed
+// switch has to revert. One whose write failed has already put itself back —
+// Driver.Apply restores on failure — and reverting it again costs a second write
+// and, for a worker, a second ready wait for a template that is already there.
 func switchAll(
 	ctx context.Context,
 	r target.Rollout,
 	routable, riders []bgTarget,
 	o Options,
-) []string {
+) (errs []string, written []*target.Change) {
 	var (
-		mu   sync.Mutex
-		errs []string
-		wg   sync.WaitGroup
+		mu sync.Mutex
+		wg sync.WaitGroup
 	)
 	fail := func(format string, args ...any) {
 		mu.Lock()
@@ -804,13 +808,17 @@ func switchAll(
 		wg.Go(func() {
 			if err := o.Driver.Apply(ctx, ch); err != nil {
 				fail("%s: %v", ch.Target.Label(), err)
+				return
 			}
+			mu.Lock()
+			written = append(written, ch)
+			mu.Unlock()
 		})
 	}
 	wg.Wait()
 
 	sort.Strings(errs)
-	return errs
+	return errs, written
 }
 
 // abandonAll puts the traffic back and switches off the revisions that never
