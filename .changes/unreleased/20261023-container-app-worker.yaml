@@ -1,3 +1,0 @@
-kind: Added
-body: '`ingress: false` on a `container-app` target declares a worker — a queue consumer or anything else that takes no requests. In a blue-green service it rides along at the switch like a job, written as a direct update that waits for the revision to be ready and is reverted if the switch fails. The plan refuses it unless the app has no ingress and is in Single revision mode.'
-time: 2026-10-23T09:00:00Z
