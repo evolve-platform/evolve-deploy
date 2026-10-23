@@ -100,13 +100,35 @@ traffic moved, which is what was asked for.
 **Neither asks for confirmation.** A tool that asks during an outage is a tool
 in the way. So they say what they are about to do before doing it.
 
-**They move traffic only.** Anything published per side — a Hive target, a
-schema registry — still describes the version that was serving before, and both
-commands say so:
+**The riders come along.** A job or an `ingress: false` worker has no side of
+its own, so once the traffic has moved, each service's riders are put on the
+version the side it moved to holds. Nothing is remembered for this: the version
+is read off the traffic, and what it ran with off the platform — the worker's
+newest revision on that version, the job's newest run on it. Where neither is
+left, only the image tag goes back and the line says the environment and command
+are today's.
 
 ```
-This moved traffic only. Anything published per side — a Hive target,
-a schema registry — still describes the version that was serving before.
+Bringing 1 rider(s) to the version their service now serves:
+  container-app/evolve-prd-purchase-events  version c2a1950 -> 27ec167, as revision evolve-prd-purchase-events--x1y2z3 ran it
+  container-app/evolve-prd-purchase-events  now on 27ec167
+```
+
+The traffic moves first and stays moved. A rider that fails is named, with the
+`apply --set` that finishes the job, and the command exits non-zero. A rider the
+platform cannot put back — anything that is not a Container Apps worker or job,
+or every rider after an ECS undo — is listed as not moved with the same command.
+`traffic` without `--to` shows each rider's version under its service, so one
+that was left behind is visible.
+
+**Anything published per side is not undone.** A Hive target or a schema
+registry still describes the version that was serving before, and both commands
+say so:
+
+```
+This moved traffic and the riders beside it. Anything published per side —
+a Hive target, a schema registry — still describes the version that was
+serving before.
 ```
 
 ## Rolling back a `direct` release

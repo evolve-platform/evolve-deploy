@@ -1127,8 +1127,41 @@ inferred from is also what a broken API looks like. An app that lost its ingress
 or its revision mode by accident is refused, as above; only one the config says
 is a worker is deployed without a gate.
 
-A rollback by `traffic --to` moves the traffic and nothing else, so a worker, like
-a job, stays on the version it was last released with.
+> **Riders follow a rollback.** `rollback` and `traffic --to` move the traffic
+> first, then bring each moved service's riders to the version the label they
+> moved to holds.
+
+Without this a rollback undoes half a release: the API back on yesterday's code,
+its consumer and its cron still on today's. And it has to stay true to the rest
+of the tool, so there is nothing recorded at the switch to restore from. The
+version comes from the traffic block — the labelled revision's image tag, which
+`rollback` already reads — and what that version ran with comes from whatever
+the platform still holds of it:
+
+| Rider | Restored from | When nothing is left |
+|---|---|---|
+| worker (Azure) | the newest revision whose image is that version: Single mode deactivates the revision it replaces but keeps its template | the tag only |
+| job (Azure) | the newest run on that version: a run records the containers it started with | the tag only |
+| anything else | — | listed as not moved, with the deploy that moves it |
+
+The environment, entry point and arguments of the application container come
+from the record; everything else in the template — resources, probes, the sidecar
+— stays as Terraform has it now, the same as in a release. The record's revision
+is patched back rather than activated: a revision activated in Single mode is not
+reliably the one that serves, and a patch gets the release's ready wait and
+revert. A rider already on the version is not written, so a second rollback does
+nothing.
+
+The limits are the platform's. Container Apps keeps a bounded number of inactive
+revisions and of job runs, and a job that has not run since a version was
+released has no run on it. Then only the tag goes back, with today's environment
+and command — what `apply --set svc=<version>` would do — and the line says so.
+
+The traffic goes first because it is the half users see and it is one write. A
+rider that then fails does not move it back: the command fails, naming the rider
+and the deploy that finishes the job. Where the platform reverses the release
+itself — ECS — there is no version to follow, and the riders are listed with that
+deploy.
 
 ## The Terraform side
 

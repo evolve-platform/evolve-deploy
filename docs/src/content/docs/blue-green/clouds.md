@@ -39,8 +39,8 @@ the same way once its target says `ingress: false`. It is written at the switch
 as a direct update, waiting for the new revision to be ready, and reverted if the
 switch fails. It has no side of its own, so it must run in Single revision mode:
 in Multiple the revision it replaces would keep running and keep consuming, on
-the old code. `traffic --to` and `rollback` move only what carries traffic, so
-they leave a worker on the version it was last released with, as they do a job.
+the old code. `traffic --to` and `rollback` bring it back with the traffic, from
+its newest revision on the version they moved to — see [rollback](../rollback/).
 
 ```yaml
 targets:

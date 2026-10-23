@@ -375,6 +375,30 @@ type Undoer interface {
 	Undo(ctx context.Context, t *config.Target) (string, error)
 }
 
+// Restorer is implemented by drivers that can put a rider back on the version a
+// side holds, outside a release.
+//
+// A rider — a job, a worker, anything that carries no traffic — has no side of
+// its own to point at, so moving the traffic leaves it on the version it was
+// last released with. That is the half a rollback would otherwise not undo: the
+// API back on yesterday's code and its consumer still on today's.
+//
+// There is nothing remembered to restore from. The version comes from the label
+// the traffic moved to, and what that version ran with is read off whatever the
+// platform still holds of it. Where it holds nothing, the restore says so in its
+// Reason rather than pretending it was exact.
+type Restorer interface {
+	// RiderVersion is the version a rider runs now, read the same way a
+	// release reads FromVersion. Empty when it cannot be told.
+	RiderVersion(ctx context.Context, t *config.Target) (string, error)
+
+	// PlanRestore returns the change that puts a rider on version, applied with
+	// Driver.Apply. Nil when it is already there: a rollback run twice writes
+	// nothing the second time. An ErrNotImplemented means this rider type has
+	// no way back here, and the caller says so.
+	PlanRestore(ctx context.Context, t *config.Target, version string) (*Change, error)
+}
+
 // PruneRetention is how long a revision is kept after nothing needs it.
 //
 // Hardcoded for now, and a `strategy` field later. Ninety days is chosen to be

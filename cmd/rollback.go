@@ -33,6 +33,11 @@ half an environment on the old version is worse than either version. It refuses
 just as loudly when the traffic is already split, when a side has nothing to go
 back to, and when the two sides do not hold the same version everywhere.
 
+Once the traffic has moved, each service's riders — its jobs and its
+ingress: false workers — are put on the version the side it moved to holds, read
+off what the platform still has of that version. A rider that cannot follow is
+named with the deploy that moves it; the traffic stays where it went.
+
 The previous version is normally stopped after a switch — it keeps its label,
 not its replicas — so this starts it and waits for it before moving anything.
 That is a container start, not the instant flip you get with keep_warm, and it
@@ -87,7 +92,7 @@ version is usually a mistake, and this is how you say it is not.`,
 			if err != nil {
 				return err
 			}
-			if err := runRollback(ctx, out, rollout, steps); err != nil {
+			if err := runRollback(ctx, out, driver, rollout, f, steps); err != nil {
 				problems = append(problems, err.Error())
 			}
 		}
@@ -95,6 +100,7 @@ version is usually a mistake, and this is how you say it is not.`,
 			if err := runUndo(ctx, out, driver.(target.Undoer), undoable, f.Path); err != nil {
 				problems = append(problems, err.Error())
 			}
+			notMovedAfterUndo(out, rollout, f, servicesOf(undoable))
 		}
 		if len(problems) > 0 {
 			return fmt.Errorf("%s", strings.Join(problems, "\n"))
@@ -357,15 +363,21 @@ func rollbackFor(t *config.Target, entries []target.TrafficEntry) (*rollbackStep
 func runRollback(
 	ctx context.Context,
 	out io.Writer,
+	driver target.Driver,
 	r target.Rollout,
+	f *config.File,
 	steps []rollbackStep,
 ) error {
 	label := steps[0].to.Label
 	fmt.Fprintf(out, "Rolling back to %s on %d target(s):\n", label, len(steps))
 	fmt.Fprint(out, describeSteps(steps))
+	for _, s := range servicesOf(stepTargets(steps)) {
+		showRiders(ctx, out, driver, r, f, s)
+	}
 	fmt.Fprintln(out)
 
 	var problems []string
+	failed := map[string]bool{}
 	for _, s := range steps {
 		// Printed before rather than after: the previous version is normally
 		// stopped, so this call starts a container and waits for it, and a line
@@ -376,6 +388,7 @@ func runRollback(
 		if err := r.Point(ctx, s.target, label); err != nil {
 			fmt.Fprintf(out, "  %-40s failed: %v\n", s.target.Label(), err)
 			problems = append(problems, fmt.Sprintf("%s: %v", s.target.Label(), err))
+			failed[s.target.Service] = true
 			continue
 		}
 		fmt.Fprintf(out, "  %-40s now on %s %s\n",
@@ -387,19 +400,65 @@ func runRollback(
 		tidy(ctx, out, r, s.target)
 	}
 
+	// agreeOnRollback has already held every step to one version, so the
+	// services that moved follow that one.
+	var moves []riderMove
+	for _, s := range servicesOf(stepTargets(steps)) {
+		if failed[s] {
+			continue
+		}
+		moves = append(moves, riderMove{service: s, version: steps[0].to.Version,
+			problem: unknownVersion(steps[0].to)})
+	}
+	riderErr := restoreRiders(ctx, out, driver, r, f, moves)
+
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		return fmt.Errorf("%d target(s) did not move:\n  - %s",
-			len(problems), strings.Join(problems, "\n  - "))
+		return errors.Join(fmt.Errorf("%d target(s) did not move:\n  - %s",
+			len(problems), strings.Join(problems, "\n  - ")), riderErr)
+	}
+	if riderErr != nil {
+		return riderErr
 	}
 
 	// The same caveat traffic --to carries, and it matters more here: whoever
-	// runs this is undoing a release, and the half of a release that is not
-	// traffic is not undone by moving traffic.
+	// runs this is undoing a release, and the half of a release that is neither
+	// traffic nor a rider is not undone by this.
 	fmt.Fprint(out,
-		"\nThis moved traffic only. Anything published per side — a Hive target,\n"+
-			"a schema registry — still describes the version that was serving before.\n")
+		"\nThis moved traffic and the riders beside it. Anything published per side —\n"+
+			"a Hive target, a schema registry — still describes the version that was\n"+
+			"serving before.\n")
 	return nil
+}
+
+// unknownVersion is the reason riders cannot follow a side whose version the
+// platform keeps no record of, or empty when it does.
+func unknownVersion(e target.TrafficEntry) string {
+	if e.Version != "" {
+		return ""
+	}
+	return fmt.Sprintf("the version %s holds is not recorded, so there is nothing to follow", e.Label)
+}
+
+func stepTargets(steps []rollbackStep) []*config.Target {
+	out := make([]*config.Target, 0, len(steps))
+	for _, s := range steps {
+		out = append(out, s.target)
+	}
+	return out
+}
+
+// servicesOf is the services of some targets, once each, in order.
+func servicesOf(targets []*config.Target) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range targets {
+		if !seen[t.Service] {
+			seen[t.Service] = true
+			out = append(out, t.Service)
+		}
+	}
+	return out
 }
 
 // describeSteps renders the moves as a block, for the line before and for every

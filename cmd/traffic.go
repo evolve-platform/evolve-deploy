@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -19,10 +20,11 @@ var trafficCmd = &cobra.Command{
 	Use:   "traffic <config>",
 	Short: "Show which side is serving, or move all the traffic to one",
 	Long: `Without --to this is read-only: it prints, per blue-green service, which
-revision each label points at and what share of the traffic it gets. It is the
-answer to "what is actually running".
+revision each label points at and what share of the traffic it gets, and the
+version each of its riders runs. It is the answer to "what is actually running".
 
-With --to it puts one label on 100% and the other on 0. The side that is not
+With --to it puts one label on 100% and the other on 0, then brings each
+moved service's riders to the version that label holds. The side that is not
 serving is normally stopped — it keeps its label, not its replicas — so the
 revision is started and waited for before the weights move. That is the way out
 of a split, and the way onto a side by name.
@@ -61,9 +63,9 @@ refuse to interpret.`,
 		}
 
 		if flagTo == "" {
-			return showTraffic(ctx, out, rollout, targets)
+			return showTraffic(ctx, out, driver, rollout, f, targets)
 		}
-		return moveTraffic(ctx, out, rollout, targets, flagTo)
+		return moveTraffic(ctx, out, driver, rollout, f, targets, flagTo)
 	},
 }
 
@@ -93,7 +95,9 @@ func pointableTargets(f *config.File, r target.Rollout) []*config.Target {
 func showTraffic(
 	ctx context.Context,
 	out io.Writer,
+	driver target.Driver,
 	r target.Rollout,
+	f *config.File,
 	targets []*config.Target,
 ) error {
 	var problems []string
@@ -134,6 +138,11 @@ func showTraffic(
 				fmt.Fprintf(out, "  %-8s (none)\n", label)
 			}
 		}
+
+		// Once per service, under its last routable target.
+		if i == len(targets)-1 || targets[i+1].Service != t.Service {
+			showRiders(ctx, out, driver, r, f, t.Service)
+		}
 	}
 
 	if len(problems) > 0 {
@@ -156,7 +165,9 @@ func showTraffic(
 func moveTraffic(
 	ctx context.Context,
 	out io.Writer,
+	driver target.Driver,
 	r target.Rollout,
+	f *config.File,
 	targets []*config.Target,
 	label string,
 ) error {
@@ -167,30 +178,69 @@ func moveTraffic(
 	fmt.Fprintln(out)
 
 	var problems []string
+	failed := map[string]bool{}
 	for _, t := range targets {
 		fmt.Fprintf(out, "  %-40s moving\n", t.Label())
 		if err := r.Point(ctx, t, label); err != nil {
 			fmt.Fprintf(out, "  %-40s failed: %v\n", t.Label(), err)
 			problems = append(problems, fmt.Sprintf("%s: %v", t.Label(), err))
+			failed[t.Service] = true
 			continue
 		}
 		fmt.Fprintf(out, "  %-40s now on %s\n", t.Label(), label)
 		tidy(ctx, out, r, t)
 	}
 
+	// Only a service whose traffic moved everywhere takes its riders along:
+	// half a service on each side has no single version for them to follow.
+	riderErr := restoreRiders(ctx, out, driver, r, f,
+		movedServices(ctx, r, targets, label, failed))
+
 	if len(problems) > 0 {
 		sort.Strings(problems)
-		return fmt.Errorf("%d target(s) did not move:\n  - %s",
-			len(problems), strings.Join(problems, "\n  - "))
+		return errors.Join(fmt.Errorf("%d target(s) did not move:\n  - %s",
+			len(problems), strings.Join(problems, "\n  - ")), riderErr)
+	}
+	if riderErr != nil {
+		return riderErr
 	}
 
 	// The schema half of a release is not this command's to undo, and finding
 	// that out from a router serving a schema nobody implements is a bad way to
 	// learn it.
 	fmt.Fprint(out,
-		"\nThis moved traffic only. Anything published per side — a Hive target,\n"+
-			"a schema registry — still describes the version that was serving before.\n")
+		"\nThis moved traffic and the riders beside it. Anything published per side —\n"+
+			"a Hive target, a schema registry — still describes the version that was\n"+
+			"serving before.\n")
 	return nil
+}
+
+// movedServices is every service all of whose targets moved, and the version
+// the label now serving it holds.
+func movedServices(
+	ctx context.Context,
+	r target.Rollout,
+	targets []*config.Target,
+	label string,
+	failed map[string]bool,
+) []riderMove {
+	byService := map[string][]*config.Target{}
+	var order []string
+	for _, t := range targets {
+		if failed[t.Service] {
+			continue
+		}
+		if _, ok := byService[t.Service]; !ok {
+			order = append(order, t.Service)
+		}
+		byService[t.Service] = append(byService[t.Service], t)
+	}
+
+	moves := make([]riderMove, 0, len(order))
+	for _, s := range order {
+		moves = append(moves, servedVersion(ctx, r, s, byService[s], label))
+	}
+	return moves
 }
 
 func init() {
