@@ -592,3 +592,50 @@ services:
 		t.Errorf("err = %v, want a refusal naming the empty command", err)
 	}
 }
+
+// `ingress` is a statement only a container app can make: a job never has
+// ingress and a Cloud Run service always does, so on either it would read as a
+// setting that took effect.
+func TestIngressIsAContainerAppField(t *testing.T) {
+	const azureHeader = `
+cloud:
+  provider: azure
+  subscription: 00000000-0000-0000-0000-000000000000
+  resource_group: evolve-tst
+`
+	f, err := load(t, azureHeader+`
+services:
+  purchase:
+    version: abc1234
+    targets:
+      - type: container-app
+        name: evolve-tst-purchase
+      - type: container-app
+        name: evolve-tst-purchase-events
+        command: ["node", "src/cli.ts", "events"]
+        ingress: false
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := f.Services["purchase"].Targets
+	if targets[0].NoIngress() {
+		t.Error("a target without the field reads as having no ingress")
+	}
+	if !targets[1].NoIngress() {
+		t.Error("`ingress: false` was not read")
+	}
+
+	_, err = load(t, azureHeader+`
+services:
+  discover:
+    version: abc1234
+    targets:
+      - type: container-app-job
+        name: evolve-tst-discover-products
+        ingress: false
+`)
+	if err == nil || !strings.Contains(err.Error(), "ingress") {
+		t.Errorf("`ingress` on a job was not refused: %v", err)
+	}
+}

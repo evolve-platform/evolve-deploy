@@ -99,6 +99,7 @@ Exactly what is accepted and what is not:
 | `latestRevision: true` / `type: LATEST` | ⚠️ bootstrap, see below |
 | `activeRevisionsMode: Single` (Azure) | ❌ labels do not exist there |
 | No ingress (a job, an internal worker) | ❌ no traffic to divide |
+| No ingress and Single, declared `ingress: false` (Azure) | ✅ a worker, rides along — see Jobs and workers |
 
 ### Bootstrap
 
@@ -1107,6 +1108,27 @@ goes back with it — the rollback boundary is the service, and that stays true.
 
 The same holds for a `lambda` next to an `ecs` service, and for any other target
 without ingress in a blue-green service.
+
+A worker is a container app with no ingress: a queue consumer on the service's
+image, `node src/cli.ts events` beside `serve`. It has the job's problem — no
+traffic, one image with the API — and one of its own: it is long-running, so in
+Multiple revision mode the revision it replaces keeps its replicas and keeps
+consuming. Labels would not help: a label routes requests, and a worker takes
+none.
+
+> **A worker is declared, and rides along.** `ingress: false` on a
+> `container-app` target makes it a rider. It is written at the switch the
+> direct way — template patch, wait for the revision to be ready, revert on
+> failure — and must be in Single revision mode with no ingress, which the plan
+> checks against the app.
+
+It is declared rather than inferred from the app because the shape it would be
+inferred from is also what a broken API looks like. An app that lost its ingress
+or its revision mode by accident is refused, as above; only one the config says
+is a worker is deployed without a gate.
+
+A rollback by `traffic --to` moves the traffic and nothing else, so a worker, like
+a job, stays on the version it was last released with.
 
 ## The Terraform side
 

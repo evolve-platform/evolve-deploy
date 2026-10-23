@@ -75,8 +75,12 @@ type appPayload struct {
 // Only the application container is touched. The reverse proxy beside it — and
 // its proxy_env_vars — is copied through untouched, because that image and its
 // settings belong to Terraform.
+//
+// A worker — `ingress: false` — always comes through here, blue-green service or
+// not: it has no side of its own, so it is written the direct way, and the plan
+// decides when. In a blue-green service that is at the switch.
 func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Change, error) {
-	if want.Target.Strategy.IsBlueGreen() {
+	if want.Target.Strategy.IsBlueGreen() && d.Routable(want.Target) {
 		return d.planAppBlueGreen(ctx, want)
 	}
 
@@ -91,6 +95,11 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 	app := got.ContainerApp
 	if app.Properties == nil || app.Properties.Template == nil {
 		return nil, fmt.Errorf("container app %s has no template", t.Name)
+	}
+	if t.NoIngress() {
+		if err := checkWorker(t.Name, app.Properties.Configuration); err != nil {
+			return nil, err
+		}
 	}
 
 	current := app.Properties.Template.Containers
@@ -135,6 +144,35 @@ func (d *Driver) planApp(ctx context.Context, want *target.Desired) (*target.Cha
 		PublicURL:  appURL(appFQDN(&app)),
 		Payload:    &appPayload{containers: next, previous: current},
 	}, nil
+}
+
+// checkWorker holds an app declared `ingress: false` to the shape that makes
+// writing it the direct way safe.
+//
+// No ingress, because the declaration says there are no requests and the plan
+// relies on it: an app that does take them would be released without a gate.
+// Single revision mode, because in Multiple the revision being replaced keeps
+// its replicas, and a worker that is still running is still doing the work —
+// on the previous version, beside the new one, with nothing to switch off.
+//
+// Both are Terraform's, so this reports them rather than writing them.
+func checkWorker(name string, cfg *armappcontainers.Configuration) error {
+	if cfg != nil && cfg.Ingress != nil {
+		return fmt.Errorf(
+			"container app %s is declared `ingress: false` but has ingress; "+
+				"remove the ingress block in Terraform, or drop `ingress: false` "+
+				"from the target if it does take requests", name)
+	}
+	// Unset is Single: it is the platform's default, and what an app created
+	// without saying reads back as.
+	if cfg != nil && cfg.ActiveRevisionsMode != nil &&
+		*cfg.ActiveRevisionsMode != armappcontainers.ActiveRevisionsModeSingle {
+		return fmt.Errorf(
+			"container app %s is declared `ingress: false` but is in %s revision mode, "+
+				"which leaves the revision it replaces running beside the new one; "+
+				"set revision_mode = \"Single\" in Terraform", name, *cfg.ActiveRevisionsMode)
+	}
+	return nil
 }
 
 func (d *Driver) applyApp(ctx context.Context, ch *target.Change) error {

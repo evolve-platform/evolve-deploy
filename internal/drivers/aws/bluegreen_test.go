@@ -154,13 +154,13 @@ func TestPendingHook(t *testing.T) {
 // the old one away, so nothing outside a release can point at one.
 func TestECSIsRoutableButNotPointable(t *testing.T) {
 	var d Driver
-	if !d.Routable(config.TypeECS) {
+	if !d.Routable(&config.Target{Type: config.TypeECS}) {
 		t.Error("a release does move an ECS service's traffic")
 	}
-	if d.Pointable(config.TypeECS) {
+	if d.Pointable(&config.Target{Type: config.TypeECS}) {
 		t.Error("there is no standing side on ECS to point at")
 	}
-	if d.Routable(config.TypeLambda) {
+	if d.Routable(&config.Target{Type: config.TypeLambda}) {
 		t.Error("a lambda has no listener rule; it rides along")
 	}
 }

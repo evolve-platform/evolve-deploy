@@ -263,10 +263,14 @@ type Staged struct {
 // route is a plan-time error when the config asks for blue-green, never a
 // silent direct update.
 type Rollout interface {
-	// Routable reports whether this target type carries traffic at all. A
-	// container app job has no ingress: it rides along with the service it
-	// shares an image with and is written at the switch.
-	Routable(t config.TargetType) bool
+	// Routable reports whether this target carries traffic at all. A container
+	// app job has no ingress: it rides along with the service it shares an image
+	// with and is written at the switch.
+	//
+	// It is asked of a target rather than a type, because on Container Apps the
+	// type does not settle it: a container app declared `ingress: false` is a
+	// worker and rides along like the job beside it.
+	Routable(t *config.Target) bool
 
 	// Pointable reports whether traffic here can be moved to a side by name,
 	// outside a release. It is what `rollback` and `traffic --to` need, and it
@@ -277,7 +281,7 @@ type Rollout interface {
 	// stands still long enough to be named. Such a target is routable, because
 	// a release does move its traffic, and not pointable, because nothing
 	// outside a release can.
-	Pointable(t config.TargetType) bool
+	Pointable(t *config.Target) bool
 
 	// Sides reads the current split. It fails when no single label has 100%.
 	Sides(ctx context.Context, t *config.Target) (*Sides, error)

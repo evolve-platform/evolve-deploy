@@ -82,7 +82,7 @@ func pointableTargets(f *config.File, r target.Rollout) []*config.Target {
 			continue
 		}
 		for _, t := range c.Targets {
-			if r.Pointable(t.Type) {
+			if r.Pointable(t) {
 				out = append(out, t)
 			}
 		}

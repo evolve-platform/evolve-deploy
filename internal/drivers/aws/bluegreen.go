@@ -48,8 +48,8 @@ type bgPayload struct {
 //
 // A lambda beside an ECS service has no listener rule and nothing to shift: it
 // rides along and is written at the switch.
-func (d *Driver) Routable(t config.TargetType) bool {
-	return t == config.TypeECS
+func (d *Driver) Routable(t *config.Target) bool {
+	return t.Type == config.TypeECS
 }
 
 // Pointable is false, and that is the honest answer rather than a limitation.
@@ -58,7 +58,7 @@ func (d *Driver) Routable(t config.TargetType) bool {
 // both target groups, swaps them itself, and terminates the old tasks once the
 // bake time is up — so between releases there is no second side standing that
 // anything could be pointed at. See Point for what to do instead.
-func (d *Driver) Pointable(config.TargetType) bool { return false }
+func (d *Driver) Pointable(*config.Target) bool { return false }
 
 // Fallback: ECS terminates the old side itself, so what a rollback would find
 // is a window if bake_time asked for one, and otherwise nothing.
