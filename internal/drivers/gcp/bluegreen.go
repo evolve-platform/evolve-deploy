@@ -50,12 +50,12 @@ type bgPayload struct {
 // Routable reports which target types carry traffic. A Cloud Run service does;
 // a Cloud Run job has no ingress, so it rides along with the service it shares
 // an image with and is written at the switch.
-func (d *Driver) Routable(t config.TargetType) bool {
-	return t == config.TypeCloudRun
+func (d *Driver) Routable(t *config.Target) bool {
+	return t.Type == config.TypeCloudRun
 }
 
 // Pointable: the traffic block is the tool's own here too.
-func (d *Driver) Pointable(t config.TargetType) bool { return d.Routable(t) }
+func (d *Driver) Pointable(t *config.Target) bool { return d.Routable(t) }
 
 // Fallback: the switch takes the tag off the side that stops serving, so it
 // leaves the traffic block and Cloud Run retires it. Traffic arriving is what

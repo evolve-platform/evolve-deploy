@@ -108,6 +108,7 @@ services:
 | `cluster` | ecs | Cluster name or ARN. Required for `ecs` |
 | `base` | ecs | Task definition family Terraform owns. Default `<name>-base` |
 | `container` | ecs | Which container carries the application image. Only needed when a task has several and none uses the conventional name |
+| `ingress` | container-app | `false` for an app that takes no requests — a queue consumer, a worker. It rides along at the switch of a blue-green service, and the app must have no ingress and be in Single revision mode |
 | `test_url` | ecs | Where the test listener rule answers. Required for a blue-green ECS target |
 | `code` | lambda, function-app | Where the deployment package lives |
 
@@ -187,7 +188,8 @@ What is refused:
 - A service called `(release)`, which is what the staged release is reported as
 - Two targets with the same type and name
 - `base`, `cluster` or `container` outside `ecs`; `code` outside `lambda` and
-  `function-app`; `code.bucket` on a `function-app`
+  `function-app`; `code.bucket` on a `function-app`; `ingress` outside
+  `container-app`
 - A missing `cluster` on `ecs`, or missing `code` on `lambda`
 - `EVOLVE_DEPLOY_SIDE` set by hand — the tool writes it
 - `smoke` on a service rather than on the file's `strategy` block
@@ -210,6 +212,10 @@ these need credentials but still deploy nothing:
 - `keep_warm` outside Container Apps
 - `bake_time` outside ECS
 - `env` on a `function-app` target
+- A container app declared `ingress: false` that has ingress, or is in Multiple
+  revision mode
+- A blue-green container app with no ingress or in Single revision mode that is
+  not declared `ingress: false`
 - An image tag that does not exist, or a reference that resolves to nothing
 - Traffic, listener rules or scale rules Terraform never declared
 - A hook naming a template variable that does not exist, or an action whose API

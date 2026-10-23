@@ -670,7 +670,7 @@ func checkStrategy(d target.Driver, c *config.Service) []string {
 
 	var routable, riders []string
 	for _, t := range c.Targets {
-		if r.Routable(t.Type) {
+		if r.Routable(t) {
 			routable = append(routable, t.Label())
 		} else {
 			riders = append(riders, t.Label())
@@ -751,7 +751,7 @@ func (c *ServicePlan) readSide(ctx context.Context, d target.Driver) (*target.Si
 		return nil, fmt.Errorf("%s cannot move traffic", d.Name())
 	}
 	for _, t := range c.Service.Targets {
-		if r.Routable(t.Type) {
+		if r.Routable(t) {
 			return r.Sides(ctx, t)
 		}
 	}

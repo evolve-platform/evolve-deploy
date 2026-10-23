@@ -212,13 +212,13 @@ func TestUndoableTargetsPicksWhatCannotBePointedAt(t *testing.T) {
 
 type delegatingRollout struct{ target.Rollout }
 
-func (delegatingRollout) Routable(t config.TargetType) bool { return t == config.TypeECS }
-func (delegatingRollout) Pointable(config.TargetType) bool  { return false }
+func (delegatingRollout) Routable(t *config.Target) bool { return t.Type == config.TypeECS }
+func (delegatingRollout) Pointable(*config.Target) bool  { return false }
 
 type pointingRollout struct{ target.Rollout }
 
-func (pointingRollout) Routable(t config.TargetType) bool  { return t == config.TypeECS }
-func (pointingRollout) Pointable(t config.TargetType) bool { return t == config.TypeECS }
+func (pointingRollout) Routable(t *config.Target) bool  { return t.Type == config.TypeECS }
+func (pointingRollout) Pointable(t *config.Target) bool { return t.Type == config.TypeECS }
 
 type delegatingDriver struct{ target.Driver }
 

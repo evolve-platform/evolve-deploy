@@ -27,6 +27,10 @@ type rolloutDriver struct {
 	active, idle string
 	idleFor      map[string]string
 
+	// workers are targets of a routable type that the driver says carry no
+	// traffic, the way a container app declared `ingress: false` does.
+	workers map[string]bool
+
 	failStage  map[string]bool
 	failSwitch map[string]bool
 	failSettle map[string]bool
@@ -66,8 +70,10 @@ func (d *rolloutDriver) took() []string {
 	return append([]string(nil), d.steps...)
 }
 
-func (d *rolloutDriver) Routable(t config.TargetType) bool  { return t == config.TypeECS }
-func (d *rolloutDriver) Pointable(t config.TargetType) bool { return d.Routable(t) }
+func (d *rolloutDriver) Routable(t *config.Target) bool {
+	return t.Type == config.TypeECS && !d.workers[t.Name]
+}
+func (d *rolloutDriver) Pointable(t *config.Target) bool { return d.Routable(t) }
 
 // fallback is what the fake reports a rollback would find, so the tests can
 // pin the line without pinning one cloud's answer to it.
@@ -102,7 +108,7 @@ func (d *rolloutDriver) Plan(ctx context.Context, want *target.Desired) (*target
 	if err != nil {
 		return nil, err
 	}
-	staged := d.Routable(want.Target.Type) && want.Target.Strategy.IsBlueGreen()
+	staged := d.Routable(want.Target) && want.Target.Strategy.IsBlueGreen()
 
 	// Mirrors the real driver: a staged target with nothing to change is still
 	// planned, as a carry, because the side it goes on has to be complete.
@@ -413,6 +419,44 @@ services:
 
 	if steps := d.took(); !contains(steps, "abandon:discover") {
 		t.Errorf("the traffic was not put back after a rider failed: %v", steps)
+	}
+}
+
+// Whether a target carries traffic is asked of the target, not its type. Two
+// targets of one type can differ — a container app and a worker beside it — and
+// the one the driver calls a worker is written at the switch like any rider,
+// never staged onto a side of its own.
+func TestAWorkerOfARoutableTypeRidesAlong(t *testing.T) {
+	d := newRolloutDriver()
+	d.workers = map[string]bool{"purchase-events": true}
+
+	_, _, err := runBlueGreen(t, d, header+`
+strategy:
+  type: blue-green
+
+services:
+  purchase:
+    version: new
+    cluster: platform
+    targets:
+      - { type: ecs, name: purchase }
+      - { type: ecs, name: purchase-events }
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	steps := d.took()
+	if contains(steps, "stage:purchase-events") || contains(steps, "switch:purchase-events") {
+		t.Errorf("the worker was staged as a side: %v", steps)
+	}
+	stage := index(steps, "stage:purchase")
+	worker := index(steps, "apply:purchase-events")
+	if stage < 0 || worker < 0 {
+		t.Fatalf("missing a step: %v", steps)
+	}
+	if worker < stage {
+		t.Errorf("the worker was written before the service was staged: %v", steps)
 	}
 }
 

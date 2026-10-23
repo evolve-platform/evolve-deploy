@@ -122,7 +122,7 @@ func undoableTargets(
 		}
 		for _, t := range c.Targets {
 			// Carries traffic, but has no side that stands still to be named.
-			if r.Routable(t.Type) && !r.Pointable(t.Type) {
+			if r.Routable(t) && !r.Pointable(t) {
 				out = append(out, t)
 			}
 		}

@@ -121,6 +121,10 @@ resource "azurerm_container_app" "site" {
 }
 ```
 
+A worker declared `ingress: false` is the opposite: no ingress block, and
+`revision_mode = "Single"`, so the revision it replaces is stopped rather than left
+consuming beside it. It needs no traffic block and no `ignore_changes` on one.
+
 ### GCP Cloud Run
 
 No revision mode to switch on — several revisions with a split are always

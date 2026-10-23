@@ -34,6 +34,23 @@ do](../../infrastructure/terraform/).
 Container App **Jobs** carry no traffic, so they ride along: their templates are
 written at the switch, never before it.
 
+A container app that takes no requests — a queue consumer, a worker — rides along
+the same way once its target says `ingress: false`. It is written at the switch
+as a direct update, waiting for the new revision to be ready, and reverted if the
+switch fails. It has no side of its own, so it must run in Single revision mode:
+in Multiple the revision it replaces would keep running and keep consuming, on
+the old code. `traffic --to` and `rollback` move only what carries traffic, so
+they leave a worker on the version it was last released with, as they do a job.
+
+```yaml
+targets:
+  - { type: container-app, name: evolve-tst-purchase }
+  - type: container-app
+    name: evolve-tst-purchase-events
+    command: ["node", "src/cli.ts", "events"]
+    ingress: false
+```
+
 This is also the only platform where `keep_warm` means anything.
 
 ## GCP Cloud Run

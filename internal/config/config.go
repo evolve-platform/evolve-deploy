@@ -394,6 +394,20 @@ type Target struct {
 	// and its jobs that CMD is the server.
 	Command []string `yaml:"command"`
 
+	// Ingress false declares a container app that takes no requests: a queue
+	// consumer, a worker. Container Apps only.
+	//
+	// Such an app has no traffic to divide, so in a blue-green service it rides
+	// along at the switch the way a job does. It has to be in Single revision
+	// mode too, or the revision it replaces keeps running beside it — and a
+	// worker that is still running is still consuming, on the old code.
+	//
+	// It is declared rather than read off the app, because the two shapes it
+	// would be inferred from are also what a misconfigured API looks like. An app
+	// that lost its ingress or its revision mode by accident has to be refused,
+	// not quietly deployed without a gate.
+	Ingress *bool `yaml:"ingress"`
+
 	// TestURL is the address the test listener rule answers on, ECS only.
 	//
 	// Everywhere else the staged side has an address the tool can work out — a
@@ -435,6 +449,11 @@ type Target struct {
 // Label is how a target is named in output: "container-app/evolve-tst-site".
 // It lives here so the plan and the progress lines cannot drift apart.
 func (t *Target) Label() string { return string(t.Type) + "/" + t.Name }
+
+// NoIngress reports whether the config declared this target takes no requests.
+// Absent means it does, which is what every config written before the field
+// existed meant.
+func (t *Target) NoIngress() bool { return t.Ingress != nil && !*t.Ingress }
 
 // Code is where a deployment package lives, for the targets that ship a zip
 // rather than an image.
@@ -683,6 +702,12 @@ func (f *File) validate() error {
 				TypeContainerApp, TypeContainerJob,
 			}, t.Type) {
 				add("%s: `container` does not apply to %s targets", where, t.Type)
+			}
+			// The other types already have one shape each: a job never has
+			// ingress, and a Cloud Run service always does. Only a container app
+			// can be either, so only there is it a statement.
+			if t.Ingress != nil && t.Type != TypeContainerApp {
+				add("%s: `ingress` only applies to container-app targets", where)
 			}
 			if t.Type != TypeLambda && t.Type != TypeFunctionApp && t.Code != nil {
 				add("%s: `code` only applies to lambda and function-app targets", where)

@@ -44,18 +44,19 @@ type bgPayload struct {
 	staged string
 }
 
-// Routable reports which target types carry traffic.
+// Routable reports which targets carry traffic.
 //
-// A container app job has no ingress and nothing to split, and a function app
-// has slots rather than labels. Both can still be part of a blue-green service:
+// A container app job has no ingress and nothing to split, a function app has
+// slots rather than labels, and a container app declared `ingress: false` is a
+// worker with neither. All three can still be part of a blue-green service:
 // they ride along and are written at the switch.
-func (d *Driver) Routable(t config.TargetType) bool {
-	return t == config.TypeContainerApp
+func (d *Driver) Routable(t *config.Target) bool {
+	return t.Type == config.TypeContainerApp && !t.NoIngress()
 }
 
 // Pointable: the traffic block is the tool's own, so a label can be handed
 // everything at any time.
-func (d *Driver) Pointable(t config.TargetType) bool { return d.Routable(t) }
+func (d *Driver) Pointable(t *config.Target) bool { return d.Routable(t) }
 
 // Fallback: the previous revision keeps its label either way, and the question
 // is only whether it kept its replicas with it.
@@ -95,11 +96,14 @@ func (d *Driver) sidesOf(
 		}
 		return nil, fmt.Errorf(
 			"container app %s is in %s revision mode; blue-green needs Multiple "+
-				"(set revision_mode = \"Multiple\" in Terraform)", t.Name, mode)
+				"(set revision_mode = \"Multiple\" in Terraform), or declare "+
+				"`ingress: false` on the target if it is a worker that takes no requests",
+			t.Name, mode)
 	}
 	if cfg.Ingress == nil {
 		return nil, fmt.Errorf(
-			"container app %s has no ingress, so it carries no traffic to divide", t.Name)
+			"container app %s has no ingress, so it carries no traffic to divide; "+
+				"declare `ingress: false` on the target if it is a worker", t.Name)
 	}
 
 	sides, err := readSides(cfg.Ingress.Traffic, t.Strategy.Labels)

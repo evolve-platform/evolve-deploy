@@ -187,29 +187,30 @@
         "cluster": { "description": "ecs: the cluster name or ARN. Required for ecs.", "$ref": "#/definitions/text" },
         "container": { "description": "Which container carries the application image. Only needed when there are several and none uses the conventional name.", "$ref": "#/definitions/text" },
         "command": { "description": "The container's whole command line. Absent keeps the entry point the target has.", "$ref": "#/definitions/texts" },
+        "ingress": { "description": "container-app: false for an app that takes no requests, a queue consumer or worker. It rides along at the switch of a blue-green service, and must be in Single revision mode.", "type": "boolean" },
         "test_url": { "description": "ecs: where the test listener rule answers. Required for a blue-green ecs target.", "$ref": "#/definitions/text" },
         "code": { "description": "lambda, function-app: where the deployment package lives.", "$ref": "#/definitions/code" }
       },
       "allOf": [
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "ecs" } } },
-          "then": { "properties": { "code": false } }
+          "then": { "properties": { "ingress": false, "code": false } }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "lambda" } } },
-          "then": { "properties": { "base": false, "cluster": false, "container": false, "command": false } }
+          "then": { "properties": { "ingress": false, "base": false, "cluster": false, "container": false, "command": false } }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "function-app" } } },
-          "then": { "properties": { "base": false, "cluster": false, "container": false, "command": false, "code": { "properties": { "bucket": false, "key": false } } } }
+          "then": { "properties": { "ingress": false, "base": false, "cluster": false, "container": false, "command": false, "code": { "properties": { "bucket": false, "key": false } } } }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "cloud-run" } } },
-          "then": { "properties": { "base": false, "cluster": false, "code": false } }
+          "then": { "properties": { "ingress": false, "base": false, "cluster": false, "code": false } }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "cloud-run-job" } } },
-          "then": { "properties": { "base": false, "cluster": false, "code": false } }
+          "then": { "properties": { "ingress": false, "base": false, "cluster": false, "code": false } }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "container-app" } } },
@@ -217,11 +218,11 @@
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "container-app-job" } } },
-          "then": { "properties": { "base": false, "cluster": false, "code": false } }
+          "then": { "properties": { "ingress": false, "base": false, "cluster": false, "code": false } }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "helm" } } },
-          "then": { "properties": { "base": false, "cluster": false, "container": false, "command": false, "code": false } }
+          "then": { "properties": { "ingress": false, "base": false, "cluster": false, "container": false, "command": false, "code": false } }
         }
       ]
     },
