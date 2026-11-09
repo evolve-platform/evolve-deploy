@@ -124,6 +124,67 @@ func TestReadSides(t *testing.T) {
 	}
 }
 
+// The bootstrap entry names no revision, and the pin is built from the sides.
+// Reading them is not enough: what matters is the block the pin then sends,
+// which went out empty and which Azure refused as weights not summing to 100.
+func TestBootstrapPinNamesTheServingRevision(t *testing.T) {
+	sides, err := readSides([]*armappcontainers.TrafficWeight{latest("blue", 100)}, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &armappcontainers.ContainerApp{Properties: &armappcontainers.ContainerAppProperties{
+		LatestReadyRevisionName: to.Ptr("app--boot"),
+	}}
+	if err := resolveLatest(sides, app); err != nil {
+		t.Fatal(err)
+	}
+
+	pin := weights(
+		trafficEntry{sides.Active, weightAll},
+		trafficEntry{sides.Idle, weightNone},
+	)
+	if len(pin) != 1 {
+		t.Fatalf("pin has %d entries, want 1:\n%s", len(pin), describeTraffic(pin))
+	}
+	if got := derefString(pin[0].RevisionName); got != "app--boot" {
+		t.Errorf("pin revision = %q, want app--boot", got)
+	}
+	if got := derefString(pin[0].Label); got != "blue" {
+		t.Errorf("pin label = %q, want blue", got)
+	}
+	if got := derefInt32(pin[0].Weight); got != weightAll {
+		t.Errorf("pin weight = %d, want %d", got, weightAll)
+	}
+}
+
+func TestResolveLatest(t *testing.T) {
+	ready := func(name string) *armappcontainers.ContainerApp {
+		p := &armappcontainers.ContainerAppProperties{}
+		if name != "" {
+			p.LatestReadyRevisionName = to.Ptr(name)
+		}
+		return &armappcontainers.ContainerApp{Properties: p}
+	}
+
+	t.Run("a named revision is left alone", func(t *testing.T) {
+		sides := &target.Sides{Active: target.Side{Label: "blue", Revision: "app--a1"}}
+		if err := resolveLatest(sides, ready("app--b2")); err != nil {
+			t.Fatal(err)
+		}
+		if sides.Active.Revision != "app--a1" {
+			t.Errorf("revision = %q, want app--a1", sides.Active.Revision)
+		}
+	})
+
+	t.Run("no ready revision is a refusal, not an empty pin", func(t *testing.T) {
+		sides := &target.Sides{Active: target.Side{Label: "blue"}, PinNeeded: true}
+		err := resolveLatest(sides, ready(""))
+		if err == nil || !strings.Contains(err.Error(), "nothing to pin") {
+			t.Fatalf("error = %v, want a refusal naming nothing to pin", err)
+		}
+	})
+}
+
 // A refusal has to show what was actually there, or whoever reads it in a
 // pipeline log has no idea what to fix.
 func TestRefusalShowsTheTrafficBlock(t *testing.T) {

@@ -110,6 +110,9 @@ func (d *Driver) sidesOf(
 	if err != nil {
 		return nil, fmt.Errorf("container app %s: %w", t.Name, err)
 	}
+	if err := resolveLatest(sides, app); err != nil {
+		return nil, fmt.Errorf("container app %s: %w", t.Name, err)
+	}
 
 	// The version that is running is the tag on the revision that is serving,
 	// not the tag in the app's template. With two live revisions the template
@@ -205,6 +208,30 @@ func readSides(traffic []*armappcontainers.TrafficWeight, labels []string) (*tar
 		sides.Idle.Revision = derefString(w.RevisionName)
 	}
 	return sides, nil
+}
+
+// resolveLatest names the revision behind a bootstrap entry.
+//
+// The entry Terraform writes on a new app is latestRevision: true with no
+// revisionName, so the active side comes out of readSides with a label and no
+// revision. The pin cannot write that: weights leaves a side without a revision
+// out, the block Azure receives is empty, and it refuses it as weights that do
+// not sum to 100. The revision the rule resolves to today is the app's latest
+// ready one, which is what the pin has to name to keep it serving.
+func resolveLatest(sides *target.Sides, app *armappcontainers.ContainerApp) error {
+	if !sides.PinNeeded || sides.Active.Revision != "" {
+		return nil
+	}
+	revision := derefString(app.Properties.LatestReadyRevisionName)
+	if revision == "" {
+		return fmt.Errorf(
+			"%s follows the latest revision, but no revision has become ready "+
+				"yet, so there is nothing to pin it to; wait for the bootstrap "+
+				"revision Terraform created to start, or fix why it does not",
+			sides.Active.Label)
+	}
+	sides.Active.Revision = revision
+	return nil
 }
 
 // describeTraffic renders a traffic block for an error message. Whoever reads a
