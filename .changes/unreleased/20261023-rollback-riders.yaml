@@ -1,3 +1,0 @@
-kind: Added
-body: '`rollback` and `traffic --to` bring a service''s riders — its Container Apps jobs and `ingress: false` workers — to the version the side the traffic moved to holds, after the traffic has moved. Nothing is recorded for it: a worker is restored from its newest revision on that version, a job from its newest run on it, and the image tag alone where neither is left. A rider that fails is named with the `apply --set` that finishes the job and fails the command without moving the traffic back; one the platform cannot restore is listed as not moved. `traffic` shows each rider''s version under its service.'
-time: 2026-10-23T12:00:00Z

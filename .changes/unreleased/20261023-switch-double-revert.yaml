@@ -1,3 +1,0 @@
-kind: Fixed
-body: A failed switch no longer reverts a rider whose own write failed, which had already put itself back; a worker paid a second ready wait for it.
-time: 2026-10-23T12:00:01Z
