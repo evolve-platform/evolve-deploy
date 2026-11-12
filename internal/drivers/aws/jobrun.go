@@ -237,7 +237,7 @@ func (d *Driver) jobTarget(j hooks.Job) (*config.Target, error) {
 			"a smoke test belongs to none — name one with `target`: %s", targetNames(all))
 	}
 	var own []*config.Target
-	if svc := d.file.Services[j.Service]; svc != nil {
+	if svc := d.file.Service(j.Service); svc != nil {
 		for _, t := range svc.Targets {
 			if t.Type == config.TypeECS {
 				own = append(own, t)

@@ -61,8 +61,8 @@ definition rather than by anything in this file.`,
 				name  string
 				hooks []*hooks.Hook
 			}{
-				{"before", cp.Service.Before},
-				{"after", cp.Service.After},
+				{"before", cp.BeforeHooks()},
+				{"after", cp.AfterHooks()},
 			} {
 				if err := runner.Run(ctx, cp.Service.Name, phase.name, phase.hooks, cp.HookVars()); err != nil {
 					return err

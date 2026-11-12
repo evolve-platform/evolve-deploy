@@ -104,6 +104,8 @@ func TestRefusedEntries(t *testing.T) {
 			"set either `project` or `projects`, not both"},
 		{"a commit with no repository", `{uses: sentry, with: {org: o, commit: abc1234}}`,
 			"needs a `repository`"},
+		{"unknown when", `{cmd: "echo x", when: sometimes}`,
+			`when: "sometimes" is not one of changed, always`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := hook(t, tt.body)
@@ -135,5 +137,32 @@ func TestCheckNamesTheEntryThatIsWrong(t *testing.T) {
 	}
 	if !strings.HasPrefix(msgs[0], "services.purchase.after[2]: ") {
 		t.Errorf("message does not name the entry: %q", msgs[0])
+	}
+}
+
+// A hook describes a version unless it says otherwise, so the default is the one
+// that stays quiet when the version did not move.
+func TestWhenDefaultsToChanged(t *testing.T) {
+	for _, tt := range []struct {
+		doc  string
+		want When
+		set  bool
+	}{
+		{`echo x`, WhenChanged, false},
+		{`{cmd: "echo x"}`, WhenChanged, false},
+		{`{cmd: "echo x", when: changed}`, WhenChanged, true},
+		{`{uses: honeycomb, with: {dataset: d}, when: always}`, WhenAlways, true},
+	} {
+		var h Hook
+		if err := yaml.Unmarshal([]byte(tt.doc), &h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.Action(); err != nil {
+			t.Fatalf("%s: %v", tt.doc, err)
+		}
+		if h.When() != tt.want || h.SetsWhen() != tt.set {
+			t.Errorf("%s: when = %q (set %v), want %q (set %v)",
+				tt.doc, h.When(), h.SetsWhen(), tt.want, tt.set)
+		}
 	}
 }

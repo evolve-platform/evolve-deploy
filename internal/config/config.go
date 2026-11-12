@@ -250,6 +250,14 @@ type File struct {
 
 	Services map[string]*Service `yaml:"services"`
 
+	// Following are the blue-green services --only left out. They are not
+	// released, but they are on the side the release stages: the side belongs
+	// to the environment, and a release that moves some of its apps and leaves
+	// the rest behind splits it, after which every later release is refused.
+	// So the plan stages them too, at the version they already serve. Empty
+	// without --only, when every service is in Services.
+	Following map[string]*Service `yaml:"-"`
+
 	// Env is the environment name (tst/acc/prd), taken from the filename rather
 	// than the contents so the two can never disagree. Available in refs and
 	// hooks as ${env} / {{.env}}.
@@ -621,6 +629,13 @@ func (f *File) validate() error {
 	if f.Strategy != nil {
 		for _, msg := range hooks.Check("strategy.smoke", f.Strategy.Smoke) {
 			add("%s", msg)
+		}
+		for i, h := range f.Strategy.Smoke {
+			if h.SetsWhen() {
+				add("strategy.smoke[%d]: `when` decides whether a service's hook runs for a "+
+					"version that did not change, and a smoke step belongs to no service: "+
+					"it runs whenever a side is staged, so remove it", i)
+			}
 		}
 	}
 
@@ -1086,6 +1101,8 @@ func (f *File) ServiceNames() []string {
 // SelectServices narrows the file to the named services, erroring on any
 // name that is not in it. An unknown name is a typo on the command line and
 // should not silently deploy nothing.
+//
+// The blue-green services it leaves out are kept as Following; see there.
 func (f *File) SelectServices(only []string) error {
 	if len(only) == 0 {
 		return nil
@@ -1104,8 +1121,23 @@ func (f *File) SelectServices(only []string) error {
 		sort.Strings(unknown)
 		return fmt.Errorf("%s: no such service: %s", f.Path, strings.Join(unknown, ", "))
 	}
+	following := map[string]*Service{}
+	for name, c := range f.Services {
+		if keep[name] == nil && c.Strategy.IsBlueGreen() {
+			following[name] = c
+		}
+	}
 	f.Services = keep
+	f.Following = following
 	return nil
+}
+
+// Service is the named service, whether --only selected it or it follows.
+func (f *File) Service(name string) *Service {
+	if c := f.Services[name]; c != nil {
+		return c
+	}
+	return f.Following[name]
 }
 
 // SetVersions overrides versions from --set name=version. Used on tst, where CI

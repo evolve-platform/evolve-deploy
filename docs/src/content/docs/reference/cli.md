@@ -20,7 +20,7 @@ Accepted by every command.
 |---|---|---|
 | `-e`, `--env NAME` | the config filename without its extension | Override what `${env}` and `{{.env}}` expand to. Changes the substitution only, never which file is read |
 | `--dir PATH` | `.` | Working directory for hooks |
-| `--only a,b` | all services | Limit the run to these services |
+| `--only a,b` | all services | Limit the run to these services. On `apply` and `diff`, a blue-green release still stages the blue-green services left out, at the version they serve |
 | `--set name=version` | | Override a version without editing the file. Repeatable |
 | `--var name=value` | | Pass a value to hooks as `{{.name}}`. Repeatable |
 | `--workers N` | `16` | How many services to roll out at once |

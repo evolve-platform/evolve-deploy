@@ -55,7 +55,14 @@ func RenderPlan(w io.Writer, p *plan.Plan) {
 		if !cp.HasWork() {
 			continue
 		}
-		fmt.Fprintf(w, "\n%s  %s\n", cp.Service.Name, cp.Service.Version)
+		// A following service's version is the one it serves, not the one in
+		// the file, and without saying so the line reads as a deploy of it.
+		if cp.Following {
+			fmt.Fprintf(w, "\n%s  %s, not in --only: follows to complete the side\n",
+				cp.Service.Name, cp.Service.Version)
+		} else {
+			fmt.Fprintf(w, "\n%s  %s\n", cp.Service.Name, cp.Service.Version)
+		}
 
 		for _, ch := range cp.Changes {
 			// A carried target is staged at the version it already runs, so
@@ -90,15 +97,31 @@ func RenderPlan(w io.Writer, p *plan.Plan) {
 			fmt.Fprintf(w, "  %-*s %s\n", width, "waits for", strings.Join(deps, ", "))
 		}
 
-		if len(cp.Service.Before) > 0 || len(cp.Service.After) > 0 {
-			fmt.Fprintf(w, "  %-*s %d before, %d after\n", width, "hooks",
-				len(cp.Service.Before), len(cp.Service.After))
-		}
+		renderHooks(w, width, cp)
 	}
 
 	fmt.Fprintln(w)
 	renderGate(w, p)
 	fmt.Fprintln(w)
+}
+
+// renderHooks says which hooks run, and why the others do not.
+//
+// A skipped hook has to be on screen: the schema publish that did not happen is
+// otherwise only noticed when someone goes looking for it.
+func renderHooks(w io.Writer, width int, cp *plan.ServicePlan) {
+	before, after := len(cp.BeforeHooks()), len(cp.AfterHooks())
+	skipped := cp.SkippedHooks()
+	switch {
+	case skipped == 0 && before+after == 0:
+	case skipped == 0:
+		fmt.Fprintf(w, "  %-*s %d before, %d after\n", width, "hooks", before, after)
+	case before+after == 0:
+		fmt.Fprintf(w, "  %-*s skipped, version unchanged\n", width, "hooks")
+	default:
+		fmt.Fprintf(w, "  %-*s %d before, %d after (%d skipped, version unchanged)\n",
+			width, "hooks", before, after, skipped)
+	}
 }
 
 // labelWidth sizes the column to the longest name actually present. A fixed

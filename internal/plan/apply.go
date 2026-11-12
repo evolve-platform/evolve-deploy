@@ -283,7 +283,8 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 	)
 
 	for _, cp := range p.Services {
-		if !cp.HasWork() || len(cp.Service.Before) == 0 {
+		before := cp.BeforeHooks()
+		if len(before) == 0 {
 			continue
 		}
 
@@ -292,7 +293,7 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 			defer func() { <-sem }()
 
 			if err := o.Hooks.RunWith(ctx, cp.Service.Name, "before",
-				cp.Service.Before, cp.HookVars().Data(), cp.hookFuncs); err != nil {
+				before, cp.HookVars().Data(), cp.hookFuncs); err != nil {
 				mu.Lock()
 				failed = append(failed, fmt.Sprintf("%s: %v", cp.Service.Name, err))
 				mu.Unlock()
@@ -312,10 +313,7 @@ func runBefore(ctx context.Context, p *Plan, o Options) []string {
 func hookWidth(p *Plan) int {
 	var width int
 	for _, cp := range p.Services {
-		if !cp.HasWork() {
-			continue
-		}
-		if len(cp.Service.Before) == 0 && len(cp.Service.After) == 0 {
+		if len(cp.BeforeHooks()) == 0 && len(cp.AfterHooks()) == 0 {
 			continue
 		}
 		width = max(width, len(cp.Service.Name)+2)
@@ -372,7 +370,7 @@ func applyService(ctx context.Context, cp *ServicePlan, o Options) error {
 	// back: the deploy worked, and removing a working version because a
 	// registration call failed is worse than the missing registration.
 	if err := o.Hooks.RunWith(ctx, c.Name, "after",
-		c.After, cp.HookVars().Data(), cp.hookFuncs); err != nil {
+		cp.AfterHooks(), cp.HookVars().Data(), cp.hookFuncs); err != nil {
 		return err
 	}
 	return nil
@@ -565,11 +563,12 @@ func applyRelease(ctx context.Context, p *Plan, plans []*ServicePlan, o Options)
 	var failed []string
 	for _, cp := range plans {
 		c := cp.Service
-		if len(c.After) == 0 {
+		after := cp.AfterHooks()
+		if len(after) == 0 {
 			continue
 		}
 		if err := o.Hooks.RunWith(ctx, c.Name, "after",
-			c.After, cp.HookVars().Data(), cp.hookFuncs); err != nil {
+			after, cp.HookVars().Data(), cp.hookFuncs); err != nil {
 			failed = append(failed, fmt.Sprintf("%s: %v", c.Name, err))
 		}
 	}

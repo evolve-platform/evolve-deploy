@@ -58,6 +58,26 @@ a registration call failed is worse than the missing registration.
 Nothing runs when there is nothing to deploy, and a service with no work has
 neither hook run.
 
+## Hooks run for a version, not for a side
+
+A blue-green release also stages services whose version does not move, only to
+complete the side: those `--only` left out, and those named at the version they
+already serve. Their `before` and `after` hooks are **skipped** — a schema
+publish, a Sentry release and a deploy marker all describe a new version, and
+here there is none. The plan says so on the service's `hooks` line.
+
+A hook that has to run whenever its service is staged says so with `when`:
+
+```yaml
+before:
+  - cmd: hive app:create --name smoke {{.label}}   # the smoke step needs this
+    when: always
+  - hive schema:publish --commit {{.version}}       # when: changed, the default
+```
+
+`when` is for `before` and `after`. A smoke step belongs to no service and runs
+whenever a side is staged, so it is refused there.
+
 For a [blue-green](../../blue-green/overview/) release there is one more step:
 `strategy.smoke` runs after everything has staged and before any traffic moves.
 

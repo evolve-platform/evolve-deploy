@@ -129,8 +129,38 @@ type Exec struct {
 //	    with: { url: '{{url "site"}}/health', retry: 5 }
 type Hook struct {
 	action Action
+	when   When
 	err    error
 }
+
+// When says which releases of a service a before or after hook runs for.
+type When string
+
+const (
+	// WhenChanged runs the hook only when the service's version moves. It is
+	// the default because nearly every hook describes a version: a schema
+	// publish, a Sentry release, a deploy marker. A service staged at the
+	// version it already serves, only to complete the side, has none of those
+	// to describe, and a marker for it is noise on a graph someone reads
+	// during an incident.
+	WhenChanged When = "changed"
+	// WhenAlways runs the hook whenever the service is staged, version or not.
+	// For the hook something else in the release needs — registering the
+	// document a smoke step sends, say — which has to be there on every side.
+	WhenAlways When = "always"
+)
+
+// When is when this hook runs; WhenChanged unless the entry says otherwise.
+func (h *Hook) When() When {
+	if h.when == "" {
+		return WhenChanged
+	}
+	return h.when
+}
+
+// SetsWhen reports whether the entry wrote `when` itself, which a smoke step
+// may not: it belongs to no service, so it has no version to compare.
+func (h *Hook) SetsWhen() bool { return h.when != "" }
 
 // Command builds a hook that runs a shell line. It is what a plain string in
 // the file becomes, and how a test writes one without going through YAML.
@@ -146,7 +176,7 @@ func Command(line string) *Hook {
 // it, and a decoder error is neither of those. So the entry parses either way
 // and Action reports the failure once validation can say where it was.
 func (h *Hook) UnmarshalYAML(n *yaml.Node) error {
-	h.action, h.err = parse(n)
+	h.action, h.when, h.err = parse(n)
 	return nil
 }
 
@@ -184,29 +214,56 @@ func Check(where string, hs []*Hook) []string {
 // In one place, so that every message about a hook is shaped the same way. The
 // path validation prints — services.site.after[1] — already says which entry;
 // the line is what an editor can be sent to.
-func parse(n *yaml.Node) (Action, error) {
-	a, err := parseNode(n)
+func parse(n *yaml.Node) (Action, When, error) {
+	a, when, err := parseNode(n)
 	if err != nil {
-		return nil, fmt.Errorf("line %d: %w", n.Line, err)
+		return nil, "", fmt.Errorf("line %d: %w", n.Line, err)
 	}
-	return a, nil
+	return a, when, nil
 }
 
-func parseNode(n *yaml.Node) (Action, error) {
+func parseNode(n *yaml.Node) (Action, When, error) {
 	switch n.Kind {
 	case yaml.ScalarNode:
 		// The original form, and still the shortest way to write the common
 		// case. Every config in existence is made of these.
-		return cmdAction{line: n.Value}, nil
+		return cmdAction{line: n.Value}, "", nil
 	case yaml.MappingNode:
 		return parseEntry(n)
 	default:
-		return nil, fmt.Errorf("a hook is either a command line or "+
+		return nil, "", fmt.Errorf("a hook is either a command line or "+
 			"a `uses` block, not a %s", kindOf(n))
 	}
 }
 
-func parseEntry(n *yaml.Node) (Action, error) {
+func parseEntry(n *yaml.Node) (Action, When, error) {
+	when, err := parseWhen(n)
+	if err != nil {
+		return nil, "", err
+	}
+	a, err := parseAction(n)
+	return a, when, err
+}
+
+// parseWhen reads `when`, which sits beside `cmd` or `uses` rather than in
+// `with`: it is about the hook, not about the action's options.
+func parseWhen(n *yaml.Node) (When, error) {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value != "when" {
+			continue
+		}
+		switch w := When(n.Content[i+1].Value); w {
+		case WhenChanged, WhenAlways:
+			return w, nil
+		default:
+			return "", fmt.Errorf("when: %q is not one of %s, %s",
+				w, WhenChanged, WhenAlways)
+		}
+	}
+	return "", nil
+}
+
+func parseAction(n *yaml.Node) (Action, error) {
 	var (
 		cmd, uses    string
 		hasCmd, seen bool
@@ -225,9 +282,11 @@ func parseEntry(n *yaml.Node) (Action, error) {
 			uses, seen = val.Value, true
 		case "with":
 			with = val
+		case "when":
+			// Read by parseWhen.
 		default:
 			return nil, fmt.Errorf("%q is not a hook field "+
-				"(want cmd, uses or with)", key.Value)
+				"(want cmd, uses, with or when)", key.Value)
 		}
 	}
 

@@ -158,6 +158,10 @@ func TestStrategyValidation(t *testing.T) {
 		body:    "strategy:\n  type: direct\n  smoke: [ true ]\n",
 		wantErr: "needs a staged side",
 	}, {
+		name:    "a smoke step has no version to compare",
+		body:    "strategy:\n  type: blue-green\n  smoke:\n    - { cmd: \"true\", when: always }\n",
+		wantErr: "strategy.smoke[0]: `when`",
+	}, {
 		name:    "keep_warm on a direct release has no side to keep",
 		body:    "strategy:\n  type: direct\n  keep_warm: true\n",
 		wantErr: "the side that stops serving",
@@ -438,5 +442,37 @@ services:
 	// It reaches the driver through the target, which is what Settle reads.
 	if f.Services["site"].Targets[0].Strategy.KeepsWarm() {
 		t.Error("the target disagrees with the service")
+	}
+}
+
+// --only leaves the blue-green services it did not name on the side, rather than
+// out of the file: the release has to bring them along.
+func TestSelectServicesKeepsTheBlueGreenOnesAsFollowing(t *testing.T) {
+	f, err := loadStrategy(t, azureHeader+`
+strategy:
+  type: blue-green
+
+services:
+  discover: { version: abc1234, type: container-app }
+  gateway:  { version: abc1234, type: container-app }
+  importer:
+    version: abc1234
+    type: container-app
+    strategy: { type: direct }
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.SelectServices([]string{"discover"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Services) != 1 || f.Services["discover"] == nil {
+		t.Errorf("selected = %v", f.ServiceNames())
+	}
+	if len(f.Following) != 1 || f.Following["gateway"] == nil {
+		t.Errorf("following = %v, want only gateway: a direct service has no side", f.Following)
+	}
+	if f.Service("gateway") == nil {
+		t.Error("a following service cannot be looked up by name")
 	}
 }

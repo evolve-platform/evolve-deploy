@@ -79,6 +79,29 @@ Two things follow:
 - **If nothing in the release has a real change, nothing is staged at all.** A
   second `apply` is still a no-op.
 
+### `--only` moves the whole side
+
+`--only` names what the release is about, not which apps end up on the side.
+Every blue-green service it leaves out is staged too, at **the version it serves
+now** — read off the traffic, never from the file, where a pipeline that deploys
+only what it built keeps placeholders. Without that, a release naming two of five
+services would move them and leave three behind, and every release after it would
+be refused as [split](../rollback/).
+
+The plan says which ones only follow:
+
+```
+gateway  4f1c2aa, not in --only: follows to complete the side
+  gateway                        4f1c2aa, staged to complete the side
+  hooks                          skipped, version unchanged
+```
+
+A following service never causes a release on its own: when nothing `--only`
+named has a change, nothing is staged. A service whose serving version cannot be
+told, or whose targets serve different ones, is refused; name it in `--only` with
+`--set` to say which version it should be. A release of `direct` services alone
+has no side, and leaves the blue-green ones unread.
+
 ## Active is the label with 100% of the traffic
 
 There is no state and no marker. The tool reads the traffic block and the side
