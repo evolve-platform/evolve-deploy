@@ -259,7 +259,8 @@
       "properties": {
         "cmd": { "description": "A command line, the same as writing it as a plain string.", "$ref": "#/definitions/text" },
         "uses": { "description": "A named action.", "enum": ["cloud-run-job", "container-app-job", "ecs-task", "honeycomb", "http", "sentry"] },
-        "with": { "description": "The action's options.", "type": "object" }
+        "with": { "description": "The action's options.", "type": "object" },
+        "when": { "description": "Which releases of the service a before or after hook runs for: changed (the default) only when its version moves, always whenever it is staged, also to complete the side at the version it already serves. Not for smoke steps.", "enum": ["changed", "always"] }
       },
       "allOf": [
         {

@@ -196,6 +196,11 @@ In a monorepo, the pipeline knows which services it just built. `--only` and
 the run is [simply satisfied](../../deploying/ordering/) rather than pulling it
 in.
 
+A blue-green service the run leaves out still moves to the staged side, at the
+version it serves now, so the environment stays on one side and the other
+services need neither a rebuild nor a `--set` of their own. See
+[`--only` moves the whole side](../../blue-green/overview/#--only-moves-the-whole-side).
+
 ```yaml
 - name: Deploy the changed services
   run: |

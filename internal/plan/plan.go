@@ -62,6 +62,11 @@ type ServicePlan struct {
 	Side     string
 	Previous string
 
+	// Following marks a blue-green service --only left out. It is in the plan at
+	// the version it serves now, only so that the release does not leave it on
+	// the side everything else is moving away from. See config.File.Following.
+	Following bool
+
 	// Vars are the --var values, kept here so hook variables are assembled in
 	// one place.
 	Vars map[string]string
@@ -332,15 +337,12 @@ func (p *Plan) checkHooks(ctx context.Context, d target.Driver) []string {
 	var msgs []string
 	for _, cp := range p.Services {
 		cp.hookFuncs = funcs
-		// No deploy, no hooks — so nothing to check, and a stale hook on a
-		// service that is not moving is not this release's problem.
-		if !cp.HasWork() {
-			continue
-		}
+		// Only the hooks that will run: a stale hook on a service that is not
+		// moving, or one this release skips, is not this release's problem.
 		for _, ph := range []struct {
 			name string
 			hs   []*hooks.Hook
-		}{{"before", cp.Service.Before}, {"after", cp.Service.After}} {
+		}{{"before", cp.BeforeHooks()}, {"after", cp.AfterHooks()}} {
 			err := hooks.ValidateWith(ph.hs, cp.HookVars().Data(), funcs)
 			if err == nil {
 				err = hooks.Probe(ctx, ph.hs, cp.HookVars().Data(), funcs, jobs)
@@ -391,6 +393,63 @@ func (p *Plan) checkSmoke(ctx context.Context, d target.Driver) error {
 // service with no work — no deploy, no schema publish.
 func (c *ServicePlan) HasWork() bool { return len(c.Changes) > 0 }
 
+// Follows reports whether this service is staged only to complete the side,
+// with its version where it was: it follows the release rather than being part
+// of it.
+//
+// A following service is one by definition. A selected one is when everything
+// it has to do is a carry — which is what naming an unchanged service in
+// --only, or passing it the version it serves with --set, comes to.
+func (c *ServicePlan) Follows() bool {
+	if c.Following {
+		return true
+	}
+	if !c.HasWork() {
+		return false
+	}
+	for _, ch := range c.Changes {
+		if !ch.Carry {
+			return false
+		}
+	}
+	return true
+}
+
+// BeforeHooks are the before hooks this release runs for the service.
+func (c *ServicePlan) BeforeHooks() []*hooks.Hook { return c.running(c.Service.Before) }
+
+// AfterHooks are the after hooks this release runs for the service.
+func (c *ServicePlan) AfterHooks() []*hooks.Hook { return c.running(c.Service.After) }
+
+// SkippedHooks counts the hooks left out because the version did not move.
+func (c *ServicePlan) SkippedHooks() int {
+	all := len(c.Service.Before) + len(c.Service.After)
+	return all - len(c.BeforeHooks()) - len(c.AfterHooks())
+}
+
+// running keeps the hooks that apply to this release of the service.
+//
+// A hook describes a version — a schema publish, a Sentry release, a deploy
+// marker — so a service that only follows to the other side runs only the ones
+// that asked to run regardless. Without this, a gateway pinned in the config
+// posted a Honeycomb marker on every backend release for a version that had not
+// changed.
+func (c *ServicePlan) running(hs []*hooks.Hook) []*hooks.Hook {
+	if !c.HasWork() {
+		return nil
+	}
+	if !c.Follows() {
+		return hs
+	}
+	var out []*hooks.Hook
+	for _, h := range hs {
+		if h.When() == hooks.WhenAlways {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // Empty reports whether the whole plan is a no-op, which is the normal outcome
 // of running twice.
 func (p *Plan) Empty() bool {
@@ -416,7 +475,7 @@ func Build(
 		return nil, err
 	}
 
-	names := f.ServiceNames()
+	units := releaseUnits(f)
 	resolver := refs.NewSnapshot(d.Resolver())
 
 	// Services are planned concurrently. Every call here is read-only, so the
@@ -426,7 +485,7 @@ func Build(
 	//
 	// Results are written to fixed positions so the plan comes out in the same
 	// order every run, whatever order the answers arrive in.
-	plans := make([]*ServicePlan, len(names))
+	plans := make([]*ServicePlan, len(units))
 
 	var (
 		mu       sync.Mutex
@@ -441,9 +500,17 @@ func Build(
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(planConcurrency)
 
-	for i, name := range names {
+	for i, u := range units {
 		g.Go(func() error {
-			cp, errs := planService(gctx, f, d, f.Services[name], vars, resolver)
+			var (
+				cp   *ServicePlan
+				errs []string
+			)
+			if u.following {
+				cp, errs = planFollower(gctx, f, d, u.service, vars, resolver)
+			} else {
+				cp, errs = planService(gctx, f, d, u.service, vars, resolver)
+			}
 			if len(errs) > 0 {
 				report(errs...)
 				return nil
@@ -487,6 +554,108 @@ func Build(
 	return p, nil
 }
 
+// unit is one service to plan, and whether --only selected it or it follows.
+type unit struct {
+	service   *config.Service
+	following bool
+}
+
+// releaseUnits is every service to plan, in name order.
+//
+// The following services only when something selected is blue-green. A release
+// of direct services stages no side, so there is nothing for them to follow —
+// and reading them anyway would let a broken reference in a service nobody
+// named fail a deploy that never touches it.
+func releaseUnits(f *config.File) []unit {
+	var units []unit
+	var staged bool
+	for _, name := range f.ServiceNames() {
+		c := f.Services[name]
+		staged = staged || c.Strategy.IsBlueGreen()
+		units = append(units, unit{service: c})
+	}
+	if staged {
+		for _, name := range sortedKeys(f.Following) {
+			units = append(units, unit{service: f.Following[name], following: true})
+		}
+	}
+	slices.SortFunc(units, func(a, b unit) int { return strings.Compare(a.service.Name, b.service.Name) })
+	return units
+}
+
+// planFollower plans a service --only left out, at the version it serves now.
+//
+// That version is read off the traffic, the same answer `traffic` prints. The
+// one in the config is no use here: in a pipeline that deploys only what it
+// built, the others carry a placeholder, and staging that would roll out an
+// image nobody asked for.
+func planFollower(
+	ctx context.Context,
+	f *config.File,
+	d target.Driver,
+	c *config.Service,
+	vars map[string]string,
+	resolver *refs.Snapshot,
+) (*ServicePlan, []string) {
+	if msgs := checkStrategy(d, c); len(msgs) > 0 {
+		return nil, msgs
+	}
+	version, err := servingVersion(ctx, d, c)
+	if err != nil {
+		return nil, []string{fmt.Sprintf(
+			"services.%s: it is not in --only, so it follows to the staged side at the "+
+				"version it serves now, and %v. Name it in --only with --set %s=<version> "+
+				"to say which version that is",
+			c.Name, err, c.Name)}
+	}
+
+	at := *c
+	at.Version = version
+	cp, errs := planService(ctx, f, d, &at, vars, resolver)
+	if cp != nil {
+		cp.Following = true
+	}
+	return cp, errs
+}
+
+// servingVersion is the one version every routable target of a service serves.
+func servingVersion(ctx context.Context, d target.Driver, c *config.Service) (string, error) {
+	r, ok := d.(target.Rollout)
+	if !ok {
+		// checkStrategy has already refused this.
+		return "", fmt.Errorf("%s cannot move traffic", d.Name())
+	}
+
+	serving := map[string][]string{}
+	for _, t := range c.Targets {
+		if !r.Routable(t) {
+			continue
+		}
+		sides, err := r.Sides(ctx, t)
+		if err != nil {
+			return "", fmt.Errorf("%s could not be read: %w", t.Label(), err)
+		}
+		serving[sides.Active.Version] = append(serving[sides.Active.Version], t.Label())
+	}
+
+	if targets, ok := serving[""]; ok {
+		return "", fmt.Errorf("the version %s serves could not be told",
+			strings.Join(targets, ", "))
+	}
+	if len(serving) > 1 {
+		var each []string
+		for _, v := range slices.Sorted(maps.Keys(serving)) {
+			each = append(each, fmt.Sprintf("%s serves %s", strings.Join(serving[v], ", "), v))
+		}
+		return "", fmt.Errorf("its targets do not serve one version: %s",
+			strings.Join(each, "; "))
+	}
+	for v := range serving {
+		return v, nil
+	}
+	return "", fmt.Errorf("no target carries traffic")
+}
+
 // settleRelease decides whether the carried targets are part of this release.
 //
 // A blue-green target with nothing to change is still planned, because the side
@@ -505,8 +674,16 @@ func Build(
 // The side itself stays known either way, because hooks use it and a
 // `{{.label}}` that works or fails depending on which of a service's targets
 // happened to move is the worst kind of intermittent.
+//
+// Only a selected service can be the reason for a release. A following one
+// whose environment drifted from the config has a real change, and still does
+// not get to stage a side on a run that named only services with nothing to do:
+// --only says what this release is about.
 func (p *Plan) settleRelease() {
 	for _, cp := range p.Services {
+		if cp.Following {
+			continue
+		}
 		for _, ch := range cp.Changes {
 			if ch.Sides != nil && !ch.Carry {
 				return
@@ -517,7 +694,7 @@ func (p *Plan) settleRelease() {
 	for _, cp := range p.Services {
 		var keep []*target.Change
 		for _, ch := range cp.Changes {
-			if ch.Carry {
+			if ch.Carry || cp.Following {
 				cp.Unchanged = append(cp.Unchanged, ch.Target)
 				continue
 			}

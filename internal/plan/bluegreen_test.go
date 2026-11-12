@@ -91,8 +91,12 @@ func (d *rolloutDriver) sidesOf(name string) *target.Sides {
 	if over, ok := d.idleFor[name]; ok {
 		active, idle = idle, over
 	}
+	serving := "old"
+	if v, ok := d.current[name]; ok {
+		serving = v
+	}
 	return &target.Sides{
-		Active: target.Side{Label: active, Revision: active + "-rev", Version: "old"},
+		Active: target.Side{Label: active, Revision: active + "-rev", Version: serving},
 		Idle:   target.Side{Label: idle, Revision: idle + "-rev"},
 	}
 }
@@ -989,5 +993,179 @@ services:
 	if !strings.Contains(err.Error(), "split across both sides") ||
 		!strings.Contains(err.Error(), "traffic <config> --to") {
 		t.Errorf("the refusal does not say how to fix it: %v", err)
+	}
+}
+
+// --- services --only left out ------------------------------------------------
+
+const followBody = header + `
+strategy:
+  type: blue-green
+
+services:
+  purchase:
+    version: new
+    type: ecs
+    cluster: platform
+  gateway:
+    version: placeholder
+    type: ecs
+    cluster: platform
+    before:
+      - echo publish {{.version}}
+      - { cmd: "echo register smoke document", when: always }
+    after:
+      - echo marker {{.version}}
+`
+
+// buildOnly plans a body the way `apply --only` does.
+func buildOnly(t *testing.T, d *rolloutDriver, body string, only ...string) (*Plan, error) {
+	t.Helper()
+	f := load(t, body)
+	if err := f.SelectServices(only); err != nil {
+		t.Fatal(err)
+	}
+	return Build(context.Background(), f, d, nil)
+}
+
+func planOf(p *Plan, name string) *ServicePlan {
+	for _, cp := range p.Services {
+		if cp.Service.Name == name {
+			return cp
+		}
+	}
+	return nil
+}
+
+// The incident this exists for: a release that named only some of the
+// blue-green services moved them and left the rest on the old side, and every
+// release after it was refused as split.
+func TestAServiceLeftOutOfOnlyFollowsToTheStagedSide(t *testing.T) {
+	d := newRolloutDriver().running("purchase", "old").running("gateway", "g1")
+
+	p, err := buildOnly(t, d, followBody, "purchase")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	gw := planOf(p, "gateway")
+	if gw == nil || !gw.Following || !gw.HasWork() {
+		t.Fatalf("gateway is not following the release: %+v", gw)
+	}
+	// The version it serves, never the placeholder in the file: staging that
+	// would roll out an image nobody built.
+	if gw.Service.Version != "g1" || gw.Changes[0].ToVersion != "g1" {
+		t.Errorf("gateway is staged at %q, want the g1 it serves", gw.Changes[0].ToVersion)
+	}
+
+	var out strings.Builder
+	if err := Apply(context.Background(), p, Options{
+		Driver: d, Hooks: &hooks.Runner{Out: io.Discard}, Out: &out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	steps := d.took()
+	if index(steps, "switch:gateway") < 0 || index(steps, "switch:purchase") < 0 {
+		t.Errorf("the environment was not moved as one: %v", steps)
+	}
+}
+
+// Running it twice must still do nothing, and a following service is never
+// the reason for a release.
+func TestFollowersStayPutWhenNothingIsReleased(t *testing.T) {
+	d := newRolloutDriver().running("purchase", "new").running("gateway", "g1")
+
+	p, err := buildOnly(t, d, followBody, "purchase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Empty() {
+		t.Errorf("a release with nothing selected to change has work")
+	}
+}
+
+// A release of direct services stages no side, so a blue-green service it did
+// not name is not even read.
+func TestFollowersAreLeftAloneByADirectRelease(t *testing.T) {
+	d := newRolloutDriver().running("importer", "old").running("gateway", "g1")
+
+	p, err := buildOnly(t, d, header+`
+strategy:
+  type: blue-green
+
+services:
+  importer:
+    version: new
+    type: ecs
+    cluster: platform
+    strategy: { type: direct }
+  gateway:
+    version: placeholder
+    type: ecs
+    cluster: platform
+`, "importer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planOf(p, "gateway") != nil {
+		t.Error("a direct release planned a blue-green service it did not name")
+	}
+}
+
+// A follower with no version to follow is refused rather than guessed.
+func TestAFollowerWithNoKnownVersionIsRefused(t *testing.T) {
+	d := newRolloutDriver().running("purchase", "old").running("gateway", "")
+
+	_, err := buildOnly(t, d, followBody, "purchase")
+	if err == nil {
+		t.Fatal("a follower with an unknown version was planned")
+	}
+	for _, want := range []string{"services.gateway", "not in --only", "--set gateway=<version>"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not mention %q: %v", want, err)
+		}
+	}
+}
+
+// A hook describes a version, so one that follows runs only the hooks that
+// asked to run regardless.
+func TestHooksRunForAVersionNotForASide(t *testing.T) {
+	d := newRolloutDriver().running("purchase", "old").running("gateway", "g1")
+
+	p, err := buildOnly(t, d, followBody, "purchase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := planOf(p, "gateway")
+	if n := len(gw.BeforeHooks()); n != 1 {
+		t.Errorf("gateway runs %d before hooks, want only the `when: always` one", n)
+	}
+	if n := len(gw.AfterHooks()); n != 0 {
+		t.Errorf("gateway runs %d after hooks for a version that did not change", n)
+	}
+	if n := gw.SkippedHooks(); n != 2 {
+		t.Errorf("SkippedHooks() = %d, want 2", n)
+	}
+}
+
+// Naming an unchanged service in --only is the same thing as letting it
+// follow, and its hooks are skipped the same way.
+func TestASelectedServiceAtTheVersionItServesSkipsItsHooks(t *testing.T) {
+	d := newRolloutDriver().running("purchase", "old").running("gateway", "g1")
+
+	f := load(t, followBody)
+	if err := f.SetVersions(map[string]string{"gateway": "g1"}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Build(context.Background(), f, d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := planOf(p, "gateway")
+	if gw.Following || !gw.Follows() {
+		t.Fatalf("gateway: Following %v, Follows %v", gw.Following, gw.Follows())
+	}
+	if n := len(gw.BeforeHooks()) + len(gw.AfterHooks()); n != 1 {
+		t.Errorf("gateway runs %d hooks, want only the `when: always` one", n)
 	}
 }
